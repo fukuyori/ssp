@@ -1,5 +1,6 @@
 ;;;; ui.lisp
-;;;; SSP - 描画、入力処理、シンタックスハイライト
+;;;; SSP v0.7 - 描画、入力処理、シンタックスハイライト
+;;;; v0.7: 日本語・Unicode対応（フォント設定、文字幅計算）
 
 (in-package :ssexp)
 
@@ -35,28 +36,40 @@
         count t))
 
 (defun draw-cell-text (canvas x y val)
-  "セルのテキストのみを描画（数値は右寄せ、それ以外は左寄せ）"
+  "セルのテキストのみを描画（数値は右寄せ、それ以外は左寄せ）
+   v0.7: 日本語フォント対応、文字幅を考慮した切り詰め"
   (when val
     (let* ((px (col-left x))
            (py (row-top y))
            (w (col-width x))
            (h (row-height y))
-           (display-text (format-value val))
+           (raw-text (format-value val))
+           ;; 利用可能な幅（ピクセル）をおおよその文字数に変換
+           ;; 半角文字幅を約7ピクセルと仮定
+           (char-pixel-width 7)
+           (available-chars (floor (- w 8) char-pixel-width))
+           ;; 表示幅が利用可能幅を超える場合は切り詰め
+           (display-text (if (> (string-display-width raw-text) available-chars)
+                             (truncate-to-display-width raw-text available-chars)
+                             raw-text))
            (path (widget-path canvas))
            ;; 数値かどうか
-           (is-number (numberp val)))
+           (is-number (numberp val))
+           ;; フォント設定
+           (font-spec (format nil "{~a} ~a" *font-family* *font-size*)))
       ;; 数値は右寄せ、それ以外は左寄せ
       (if is-number
           ;; 右寄せ（anchor: e）
-          (format-wish "~a create text ~a ~a -anchor e -text {~a} -font {Consolas 10}"
-                       path (+ px w -4) (+ py (floor h 2)) display-text)
+          (format-wish "~a create text ~a ~a -anchor e -text {~a} -font {~a}"
+                       path (+ px w -4) (+ py (floor h 2)) display-text font-spec)
           ;; 左寄せ（anchor: w）
-          (format-wish "~a create text ~a ~a -anchor w -text {~a} -font {Consolas 10}"
-                       path (+ px 4) (+ py (floor h 2)) display-text)))))
+          (format-wish "~a create text ~a ~a -anchor w -text {~a} -font {~a}"
+                       path (+ px 4) (+ py (floor h 2)) display-text font-spec)))))
 
 (defun draw-headers (canvas)
   "列名(A,B,C...)と行番号(1,2,3...)のヘッダーを描画"
-  (let ((path (widget-path canvas)))
+  (let ((path (widget-path canvas))
+        (header-font (format nil "{~a} ~a bold" *font-family* *font-size*)))
     ;; 左上隅の空白セル
     (format-wish "~a create rectangle 0 0 ~a ~a -fill {#e0e0e0} -outline gray"
                  path +header-w+ +header-h+)
@@ -68,8 +81,8 @@
              (col-name (string (code-char (+ (char-code #\A) x)))))
         (format-wish "~a create rectangle ~a 0 ~a ~a -fill {#e0e0e0} -outline gray"
                      path px px2 +header-h+)
-        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {Consolas 11 bold}"
-                     path (+ px (floor w 2)) (floor +header-h+ 2) col-name)))
+        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                     path (+ px (floor w 2)) (floor +header-h+ 2) col-name header-font)))
     ;; 行番号ヘッダー
     (dotimes (y (sheet-rows))
       (let* ((py (row-top y))
@@ -78,8 +91,8 @@
              (row-num (1+ y)))
         (format-wish "~a create rectangle 0 ~a ~a ~a -fill {#e0e0e0} -outline gray"
                      path py +header-w+ py2)
-        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {Consolas 11 bold}"
-                     path (floor +header-w+ 2) (+ py (floor h 2)) row-num)))))
+        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                     path (floor +header-w+ 2) (+ py (floor h 2)) row-num header-font)))))
 
 (defun redraw (canvas)
   "画面全体を再描画（2パス：背景→テキスト）"

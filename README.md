@@ -3,12 +3,54 @@
 **SSP is not a notebook.**  
 **It is a Lisp-native evaluation space where cells are expressions, not scripts.**
 
-![Version](https://img.shields.io/badge/version-0.6-blue.svg)
+![Version](https://img.shields.io/badge/version-0.7.1-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Lisp](https://img.shields.io/badge/Common%20Lisp-SBCL-red.svg)
 ![GUI](https://img.shields.io/badge/GUI-LTK%2FTk-orange.svg)
 
 [日本語版 README](README-JP.md)
+
+---
+
+## What's New in v0.7.1
+
+### Improved Circular Reference Detection
+
+- **Path Display**: When a circular reference is detected, the full cycle path is shown
+  - Example: `#循環: A3 (A1→A2→A3→A1)`
+- **Pre-evaluation Check**: `(detect-cycles)` function to scan all cells for cycles before they cause errors
+- **Depth Limit**: Maximum evaluation depth (100) prevents infinite loops
+
+### Performance Optimization
+
+- **Evaluation Cache**: Results are cached to avoid redundant recalculation
+  - Only "dirty" (changed) cells and their dependents are recalculated
+- **Cache Statistics**: `(show-cache-stats)` to monitor cache effectiveness
+- **Topological Sort**: Improved dependency ordering with cycle warning
+
+### New Commands
+
+```lisp
+(detect-cycles)       ; Scan all cells for circular references
+(show-cache-stats)    ; Display cache hit/miss statistics
+(show-cycle-path)     ; Show the last detected cycle path
+(clear-cache)         ; Clear evaluation cache manually
+```
+
+---
+
+## What's New in v0.7
+
+### Japanese and Unicode Support
+
+- **CJK Font Auto-Detection**: Automatically selects appropriate fonts for Japanese/Chinese/Korean characters
+  - macOS: Menlo
+  - Windows: MS Gothic
+  - Linux: Noto Sans Mono CJK JP (with fallbacks)
+- **Character Width Calculation**: Proper handling of full-width (2) vs half-width (1) characters
+- **Text Truncation**: Smart truncation with "…" suffix respecting character widths
+- **UTF-8 File I/O**: Full UTF-8 support for `.ssp` files
+- **Excel-Compatible CSV**: BOM (Byte Order Mark) prefix for proper Excel import
 
 ---
 
@@ -29,7 +71,7 @@ When you type `=(+ A1 B1)`, you're not "running code"—you're defining a **symb
 - Numbers: `42`, `3.14159`
 - Lists: `(1 2 3 4 5)`
 - Symbols: `HELLO`, `T`, `NIL`
-- Strings: `"Hello, World!"`
+- Strings: `"Hello, World!"`, `"日本語"`
 - Nested structures: `((a 1) (b 2))`
 
 ---
@@ -38,7 +80,7 @@ When you type `=(+ A1 B1)`, you're not "running code"—you're defining a **symb
 
 ```
 ╔═════════════════════════════════════════════════════════════════════╗
-║ [File] [Edit]                            SSP v0.6 [14×26]           ║
+║ [File] [Edit]                            SSP v0.7 [14×26]           ║
 ╠═════════════════════════════════════════════════════════════════════╣
 ║ =(mapcar #'1+ (range A1 A5))                                        ║
 ╠════╤════════════╤════════════════════════╤══════════╤═══════════════╣
@@ -46,11 +88,11 @@ When you type `=(+ A1 B1)`, you're not "running code"—you're defining a **symb
 ╠════╪════════════╪════════════════════════╪══════════╪═══════════════╣
 ║  1 │          1 │ (2 3 4 5 6)            │          │               ║
 ║  2 │          2 │                        │          │               ║
-║  3 │          3 │ FIBONACCI              │          │               ║
-║  4 │          4 │ "string"               │          │               ║
+║  3 │          3 │ 日本語テスト           │          │               ║
+║  4 │          4 │ "文字列"               │          │               ║
 ║  5 │          5 │                        │          │               ║
 ╚════╧════════════╧════════════════════════╧══════════╧═══════════════╝
-       ↑ Numbers         ↑ List as value
+       ↑ Numbers         ↑ Japanese text supported
 ```
 
 ---
@@ -67,38 +109,13 @@ Unlike Excel (which only supports numbers, strings, and errors), SSP cells can h
 | Float | `3.14159` | `3.142` | Right-aligned, 4-digit precision |
 | Ratio | `1/3` | `1/3` | Lisp-native exact fractions |
 | String | `"Hello"` | `Hello` | Left-aligned |
+| String (JP) | `"日本語"` | `日本語` | Full-width characters (v0.7) |
 | Symbol | `HELLO` | `HELLO` | Uppercase |
 | Keyword | `:keyword` | `:KEYWORD` | With colon prefix |
 | List | `(1 2 3)` | `(1 2 3)` | Displayed as-is |
 | Nested List | `((a 1) (b 2))` | `((A 1) (B 2))` | Alists, trees, etc. |
 | NIL | `nil` | *(empty)* | Displayed as blank cell |
 | T | `t` | `T` | Boolean true |
-
-### Input Methods
-
-```
-Direct input:    42           → Number
-                 "text"       → String  
-                 hello        → Symbol HELLO
-             
-Formula input:   =(+ 1 2)     → 3
-                 =(list 1 2 3) → (1 2 3)
-                 =(range A1 A5) → (val1 val2 val3 val4 val5)
-```
-
-### Formula Return Value Examples
-
-```lisp
-=(+ 1 2 3)                          → 6           ; Number
-=(/ 1 3)                            → 1/3         ; Ratio (exact)
-=(list 'a 'b 'c)                    → (A B C)     ; List of symbols
-=(cons 1 '(2 3))                    → (1 2 3)     ; List
-=(if (> A1 0) 'pos 'neg)            → POS         ; Symbol
-=(format nil "~a USD" A1)           → "100 USD"   ; String
-=(range A1 A5)                      → (1 2 3 4 5) ; List of values
-=(mapcar #'1+ (range A1 A3))        → (2 3 4)     ; Transformed list
-='((:name "Taro") (:age 25))        → Association list
-```
 
 ---
 
@@ -125,11 +142,11 @@ Formula input:   =(+ 1 2)     → 3
 - `#REF!` error for deleted cell references
 - Confirmation dialogs to prevent data loss
 
-### Data Types
-- Numbers right-aligned, text left-aligned
-- Lists displayed inline: `(1 2 3)`
-- Symbols uppercase: `HELLO`
-- Nil displayed as empty cell
+### Unicode Support (v0.7)
+- Japanese, Chinese, Korean character support
+- Proper full-width/half-width character handling
+- CJK font auto-selection per platform
+- UTF-8 BOM for Excel CSV compatibility
 
 ### User Interface
 - Resizable columns and rows (drag borders)
@@ -140,8 +157,8 @@ Formula input:   =(+ 1 2)     → 3
 
 ### Data Management
 - Undo/Redo (Ctrl+Z / Ctrl+Y) up to 100 operations
-- Native `.ssp` file format
-- CSV import/export
+- Native `.ssp` file format (UTF-8)
+- CSV import/export (with BOM option)
 - System clipboard (TSV format)
 - Range selection (drag or Shift+Arrow)
 
@@ -155,6 +172,11 @@ Formula input:   =(+ 1 2)     → 3
 | Quicklisp | Latest |
 | Tcl/Tk | 8.5+ |
 
+### Recommended Fonts (for CJK support)
+- **Linux**: Noto Sans Mono CJK JP, Source Han Code JP, IPAGothic
+- **macOS**: Built-in (Menlo with fallback)
+- **Windows**: MS Gothic (built-in)
+
 ---
 
 ## Installation
@@ -163,7 +185,7 @@ Formula input:   =(+ 1 2)     → 3
 
 ```bash
 # Ubuntu/Debian
-sudo apt install sbcl tk
+sudo apt install sbcl tk fonts-noto-cjk
 
 # macOS
 brew install sbcl tcl-tk
@@ -221,10 +243,10 @@ sbcl --load quicklisp.lisp
 ssp/
 ├── ssp.asd          ; ASDF system definition
 ├── load.lisp        ; Simple loader (no ASDF required)
-├── package.lisp     ; Package, constants, structures, accessors
+├── package.lisp     ; Package, constants, structures, char-width (v0.7)
 ├── formula.lisp     ; Allowed functions, evaluation engine
 ├── core.lisp        ; Cell ops, dependencies, undo/redo, file I/O
-├── ui.lisp          ; Drawing, input, syntax highlighting
+├── ui.lisp          ; Drawing, input, syntax highlighting (Unicode v0.7)
 ├── main.lisp        ; GUI construction, event handlers
 ├── README.md        ; English documentation
 └── README-JP.md     ; Japanese documentation
@@ -334,31 +356,6 @@ ssp/
 
 ---
 
-## Allowed Functions (150+)
-
-### Arithmetic
-`+`, `-`, `*`, `/`, `mod`, `rem`, `1+`, `1-`, `floor`, `ceiling`, `round`, `truncate`, `abs`, `max`, `min`, `sqrt`, `expt`, `log`, `exp`, `sin`, `cos`, `tan`, `gcd`, `lcm`
-
-### Comparison
-`=`, `/=`, `<`, `>`, `<=`, `>=`, `equal`, `equalp`, `eq`, `eql`
-
-### List Operations
-`car`, `cdr`, `cons`, `list`, `first`...`tenth`, `last`, `nth`, `length`, `append`, `reverse`, `member`, `assoc`, `mapcar`, `mapc`, `mapcan`, `reduce`, `remove`, `remove-if`, `remove-if-not`, `find`, `find-if`, `position`, `count`, `sort`, `subseq`, `butlast`, `nthcdr`
-
-### String Operations
-`string-upcase`, `string-downcase`, `string-capitalize`, `string-trim`, `concatenate`, `format`, `char`, `subseq`
-
-### Logic
-`and`, `or`, `not`, `null`, `if`, `cond`, `when`, `unless`, `case`
-
-### Type Predicates
-`numberp`, `stringp`, `listp`, `symbolp`, `atom`, `zerop`, `plusp`, `minusp`, `evenp`, `oddp`
-
-### Higher-Order
-`apply`, `funcall`, `lambda`, `mapcar`, `mapc`, `reduce`, `remove-if`, `remove-if-not`, `find-if`, `every`, `some`, `notevery`, `notany`
-
----
-
 ## File Format
 
 ### Native Format (.ssp)
@@ -366,13 +363,13 @@ ssp/
 ```lisp
 (:spreadsheet
  :format-version 1
- :metadata (:created "2025-12-20T10:30:00"
-            :modified "2025-12-20T11:45:00"
-            :app-version "0.6")
+ :metadata (:created "2025-12-26T10:30:00"
+            :modified "2025-12-26T11:45:00"
+            :app-version "0.7")
  :grid (:rows 26 :cols 14)
  :cells (("A1" 100)
          ("A2" 200 (+ A1 100))
-         ("B1" "Hello")))
+         ("B1" "日本語テスト")))
 ```
 
 ### API
@@ -381,38 +378,9 @@ ssp/
 (ssp:save "mydata.ssp")
 (ssp:load-file "mydata.ssp")
 (ssp:new-sheet)
-(ssp:export-csv "data.csv")
+(ssp:export-csv "data.csv")                    ; With BOM (Excel compatible)
+(ssp:export-csv "data.csv" :excel-compatible nil)  ; Without BOM
 (ssp:import-csv "data.csv")
-```
-
----
-
-## Architecture (v0.6)
-
-### Structure-Based Design
-
-```lisp
-(defstruct cell value formula)
-(defstruct ss-state rows cols sheet refs dependents ...)
-(defstruct eval-context row col stack env)
-```
-
-### Accessor Functions
-
-All global state accessed through accessor functions:
-- `(cursor-x)`, `(cursor-y)`, `(move-cursor x y)`
-- `(sheet-rows)`, `(sheet-cols)`
-- `(get-cell name)`, `(get-cell-raw name)`
-- `(get-refs name)`, `(get-dependents name)`
-
-### Dependency Tracking
-
-```
-A1: 10
-A2: =(+ A1 5)     ; A2 depends on A1
-A3: =(* A2 2)     ; A3 depends on A2
-
-When A1 changes → A2 recalculates → A3 recalculates
 ```
 
 ---
@@ -421,6 +389,8 @@ When A1 changes → A2 recalculates → A3 recalculates
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.7.1 | 2025-12 | Improved circular reference detection, evaluation cache, performance optimization |
+| 0.7 | 2025-12 | Japanese/Unicode support, CJK fonts, character width calculation, UTF-8 BOM for CSV |
 | 0.6 | 2025-12 | Structure-based architecture, accessor functions, modular split, renamed to SSP |
 | 0.5 | 2025-12 | Smart formula references, row/column insert/delete |
 | 0.4 | 2025-12 | Syntax highlighting, S-expression formatter |

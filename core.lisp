@@ -1,5 +1,7 @@
 ;;;; core.lisp
-;;;; SSP - セル操作、依存関係、Undo/Redo、ファイルI/O
+;;;; SSP v0.7.1 - セル操作、依存関係、Undo/Redo、ファイルI/O
+;;;; v0.7: UTF-8ファイルI/O、Excel互換CSV（BOM付き）
+;;;; v0.7.1: 循環参照検出改善、評価キャッシュ、パフォーマンス最適化
 
 (in-package :ssexp)
 
@@ -1045,7 +1047,8 @@
     refs))
 
 (defun update-dependencies (cell-name new-refs)
-  "セルの依存関係を更新"
+  "セルの依存関係を更新
+   v0.7.1: キャッシュ無効化を追加"
   (let ((old-refs (get-refs cell-name)))
     ;; 古い参照先から自分を削除
     (dolist (ref old-refs)
@@ -1056,7 +1059,11 @@
     (setf (get-refs cell-name) new-refs)
     ;; 新しい参照先に自分を追加
     (dolist (ref new-refs)
-      (pushnew cell-name (get-dependents ref) :test #'string-equal))))
+      (pushnew cell-name (get-dependents ref) :test #'string-equal))
+    ;; キャッシュを無効化 (v0.7.1)
+    (mark-dirty cell-name)
+    (dolist (dep (collect-all-dependents cell-name))
+      (mark-dirty dep))))
 
 (defun collect-all-dependents (cell-name)
   "セルに依存する全てのセルを収集（再帰的に）"
@@ -1071,8 +1078,61 @@
       (collect cell-name))
     (nreverse result)))
 
+;;;; =========================
+;;;; 循環参照検出 (v0.7.1 強化)
+;;;; =========================
+
+(defun detect-cycle-in-refs (cell-name)
+  "セルの参照先に循環があるかチェック
+   戻り値: (循環あり . 循環パス) または nil"
+  (let ((visited (make-hash-table :test 'equal))
+        (rec-stack (make-hash-table :test 'equal))
+        (path nil))
+    (labels ((dfs (name current-path)
+               (setf (gethash name visited) t)
+               (setf (gethash name rec-stack) t)
+               (push name current-path)
+               (dolist (ref (get-refs name))
+                 (cond
+                   ;; 再帰スタックにある = 循環検出
+                   ((gethash ref rec-stack)
+                    (push ref current-path)
+                    (setf path current-path)
+                    (return-from dfs t))
+                   ;; 未訪問なら再帰
+                   ((not (gethash ref visited))
+                    (when (dfs ref current-path)
+                      (return-from dfs t)))))
+               ;; バックトラック
+               (setf (gethash name rec-stack) nil)
+               nil))
+      (if (dfs cell-name nil)
+          (progn
+            (record-cycle-path path)
+            (cons t path))
+          nil))))
+
+(defun detect-cycles ()
+  "全セルの循環参照を検出して表示"
+  (format t "~%=== Checking for Circular References ===~%")
+  (let ((found-cycles nil))
+    (map-sheet 
+     (lambda (name cell)
+       (declare (ignore cell))
+       (let ((result (detect-cycle-in-refs name)))
+         (when (car result)
+           (push (cons name (cdr result)) found-cycles)))))
+    (if found-cycles
+        (progn
+          (format t "Found ~d circular reference(s):~%" (length found-cycles))
+          (dolist (cycle found-cycles)
+            (format t "  ~a: ~{~a~^ → ~}~%" (car cycle) (reverse (cdr cycle)))))
+        (format t "No circular references found.~%"))
+    found-cycles))
+
 (defun topological-sort-cells (cells)
-  "セルをトポロジカルソート（依存順）"
+  "セルをトポロジカルソート（依存順）
+   v0.7.1: 循環検出を追加"
   (let ((in-degree (make-hash-table :test 'equal))
         (graph (make-hash-table :test 'equal))
         (result nil)
@@ -1099,14 +1159,31 @@
           (decf (gethash dep in-degree))
           (when (zerop (gethash dep in-degree))
             (push dep queue)))))
+    ;; 循環検出: 全てのセルが処理されていなければ循環あり
+    (when (< (length result) (length cells))
+      (let ((remaining (remove-if (lambda (c) (member c result :test #'string-equal)) cells)))
+        (format t "Warning: Circular dependency detected in: ~a~%" remaining)))
     ;; 結果（依存順）
     (nreverse result)))
 
+;;;; =========================
+;;;; セル再計算 (v0.7.1 最適化)
+;;;; =========================
+
 (defun recalc-cell (cell-name)
-  "単一セルを再計算"
+  "単一セルを再計算
+   v0.7.1: キャッシュ対応、循環パス表示"
   (let* ((cell (get-cell cell-name))
          (formula (cell-formula cell)))
     (when formula
+      ;; キャッシュチェック (v0.7.1)
+      (when (and *enable-cache* (not (is-dirty-p cell-name)))
+        (let ((cached (get-cached-value cell-name)))
+          (when cached
+            (incf *cache-hits*)
+            (return-from recalc-cell cached))))
+      (incf *cache-misses*)
+      
       (let* ((coords (parse-cell-name cell-name))
              (col (first coords))
              (row (second coords)))
@@ -1114,12 +1191,28 @@
         (setf (eval-col) col (eval-row) row)
         (let ((*eval-stack* (list cell-name)))
           (handler-case
-              (setf (cell-value cell) (eval-formula formula))
+              (let ((new-value (eval-formula formula)))
+                (setf (cell-value cell) new-value)
+                ;; キャッシュに保存 (v0.7.1)
+                (set-cached-value cell-name new-value)
+                (clear-dirty cell-name)
+                new-value)
             (error (e)
               (let ((msg (princ-to-string e)))
-                (if (search "循環参照" msg)
-                    (setf (cell-value cell) (format-error-message :circular cell-name))
-                    (setf (cell-value cell) (format-error-message :eval msg)))))))))))
+                (cond
+                  ;; 循環参照エラー
+                  ((search "循環参照" msg)
+                   (setf (cell-value cell) 
+                         (format-cycle-error cell-name *eval-stack*)))
+                  ;; 深さ制限エラー
+                  ((search "深さ制限" msg)
+                   (setf (cell-value cell) 
+                         (format-error-message :circular 
+                           (format nil "~a (深さ超過)" cell-name))))
+                  ;; その他のエラー
+                  (t
+                   (setf (cell-value cell) 
+                         (format-error-message :eval msg))))))))))))
 
 (defun parse-cell-name (name)
   "セル名から座標(col row)を取得"
@@ -1128,16 +1221,34 @@
     (list col row)))
 
 (defun recalc-dependents (cell-name)
-  "セルに依存する全てのセルを再計算"
+  "セルに依存する全てのセルを再計算
+   v0.7.1: 変更されたセルのみ再計算"
   (let* ((deps (collect-all-dependents cell-name))
          (sorted (topological-sort-cells deps)))
+    ;; 全依存セルをdirtyとしてマーク
+    (dolist (dep deps)
+      (mark-dirty dep))
+    ;; ソート順に再計算
     (dolist (dep sorted)
       (recalc-cell dep))))
+
+(defun recalc-all-dirty ()
+  "変更されたセルのみを再計算 (v0.7.1 新規)"
+  (let ((dirty-list nil))
+    (maphash (lambda (name flag)
+               (declare (ignore flag))
+               (push name dirty-list))
+             *dirty-cells*)
+    (when dirty-list
+      (let ((sorted (topological-sort-cells dirty-list)))
+        (dolist (cell sorted)
+          (recalc-cell cell))))))
 
 (defun clear-dependencies ()
   "依存関係をクリア"
   (clear-all-refs)
-  (clear-all-dependents))
+  (clear-all-dependents)
+  (clear-cache))  ; v0.7.1: キャッシュもクリア
 
 (defun show-dependencies ()
   "依存関係をデバッグ表示"
@@ -1152,6 +1263,8 @@
   (format t "~%セル ~a:~%" cell-name)
   (format t "  参照先: ~a~%" (get-refs cell-name))
   (format t "  依存元: ~a~%" (get-dependents cell-name))
+  (format t "  キャッシュ: ~a~%" (if (get-cached-value cell-name) "有効" "無効"))
+  (format t "  Dirty: ~a~%" (if (is-dirty-p cell-name) "yes" "no"))
   (values))
 
 ;;;; =========================
@@ -1296,7 +1409,7 @@
            :format-version 1
            :metadata (:created ,(iso-timestamp)
                       :modified ,(iso-timestamp)
-                      :app-version "0.6")
+                      :app-version "0.7")
            :grid (:rows ,(sheet-rows) :cols ,(sheet-cols))
            :cells ,cells-data)
          out)
@@ -1414,14 +1527,25 @@
       ((symbolp val) (symbol-name val))
       (t (princ-to-string val)))))
 
-(defun export-csv (filename &key (include-header nil) (include-formulas nil))
+(defun export-csv (filename &key (include-header nil) (include-formulas nil) (excel-compatible t))
   "CSVファイルにエクスポート
    :include-header   列名ヘッダーを含める（デフォルトnil）
-   :include-formulas 数式を含める（デフォルトnil、値のみ）"
+   :include-formulas 数式を含める（デフォルトnil、値のみ）
+   :excel-compatible UTF-8 BOMを追加（デフォルトt、Excel対応）"
   (multiple-value-bind (min-col min-row max-col max-row) (get-used-range)
+    ;; Excel互換モードの場合、BOMを書き込み
+    (when excel-compatible
+      (with-open-file (out filename 
+                           :direction :output 
+                           :if-exists :supersede
+                           :element-type '(unsigned-byte 8))
+        (write-byte #xEF out)
+        (write-byte #xBB out)
+        (write-byte #xBF out)))
+    ;; CSVデータを書き込み
     (with-open-file (out filename 
                          :direction :output 
-                         :if-exists :supersede
+                         :if-exists (if excel-compatible :append :supersede)
                          :external-format :utf-8)
       ;; ヘッダー行（列名）
       (when include-header

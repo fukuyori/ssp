@@ -1,5 +1,7 @@
 ;;;; main.lisp
-;;;; SSP - メインGUI、start関数、イベントハンドラ
+;;;; SSP v0.7.1 - メインGUI、start関数、イベントハンドラ
+;;;; v0.7: 日本語・Unicode対応
+;;;; v0.7.1: 循環参照検出改善、パフォーマンス最適化
 
 (in-package :ssexp)
 
@@ -9,11 +11,28 @@
 
 (defun update-window-title ()
   "ウィンドウタイトルを更新"
-  (wm-title *tk* (format nil "SSP v0.6 [~Dx~D]~a" 
+  (wm-title *tk* (format nil "SSP v~a [~Dx~D]~a" 
+                         *ssp-version*
                          (sheet-cols) (sheet-rows)
                          (if (current-file) 
                              (format nil " - ~a" (file-namestring (current-file)))
                              ""))))
+
+(defun print-startup-message ()
+  "起動メッセージを表示"
+  (format t "~%")
+  (format t "╔══════════════════════════════════════════════════════════════╗~%")
+  (format t "║  SSP v~a - Symbolic Spreadsheet for Lisp Learning         ║~%" *ssp-version*)
+  (format t "╠══════════════════════════════════════════════════════════════╣~%")
+  (format t "║  New in v0.7.1:                                              ║~%")
+  (format t "║  • Improved circular reference detection with path display   ║~%")
+  (format t "║  • Evaluation cache for better performance                   ║~%")
+  (format t "║  • Evaluation depth limit to prevent infinite loops          ║~%")
+  (format t "║  • Topological sort with cycle warning                       ║~%")
+  (format t "║                                                              ║~%")
+  (format t "║  Commands: (detect-cycles) (show-cache-stats)                ║~%")
+  (format t "╚══════════════════════════════════════════════════════════════╝~%")
+  (format t "~%"))
 
 (defun start (&key (rows 26) (cols 14) (input-lines 3))
   "スプレッドシートを起動
@@ -32,6 +51,9 @@
   (clear-dependencies)
   (setf (current-file) nil)
   (init-sizes)  ; 列幅・行高さを初期化
+  
+  ;; 起動メッセージ表示 (v0.7)
+  (print-startup-message)
   
   (with-ltk ()
     (update-window-title)

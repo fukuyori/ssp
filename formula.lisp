@@ -1,7 +1,21 @@
 ;;;; formula.lisp
-;;;; SSP - 数式評価エンジン、許可関数リスト
+;;;; SSP v0.7.1 - 数式評価エンジン、許可関数リスト
+;;;; v0.7.1: 循環参照検出改善、評価深さ制限
 
 (in-package :ssexp)
+
+;;;; =========================
+;;;; 評価深さ追跡 (v0.7.1 新規)
+;;;; =========================
+
+(defvar *current-eval-depth* 0
+  "現在の評価深さ")
+
+(defun check-eval-depth ()
+  "評価深さが制限を超えていないかチェック"
+  (when (> *current-eval-depth* *max-eval-depth*)
+    (error "評価深さ制限を超えました (~d)。循環参照の可能性があります。" 
+           *max-eval-depth*)))
 
 ;;;; =========================
 ;;;; 位置参照関数
@@ -24,7 +38,8 @@
   (cell-name (eval-col) (eval-row)))
 
 (defun cell-at (row col)
-  "行列番号でセルの値を取得（row:1始まり, col:0始まりまたは文字列）"
+  "行列番号でセルの値を取得（row:1始まり, col:0始まりまたは文字列）
+   v0.7.1: 循環パス記録を追加"
   (let* ((actual-col (if (stringp col)
                          (- (char-code (char (string-upcase col) 0)) (char-code #\A))
                          col))
@@ -32,29 +47,35 @@
          (name (cell-name actual-col actual-row)))
     (when (and (>= actual-col 0) (< actual-col (sheet-cols))
                (>= actual-row 0) (< actual-row (sheet-rows)))
-      ;; 循環参照チェック
+      ;; 循環参照チェック (v0.7.1 強化)
       (if (eval-stack-member name)
-          :CIRCULAR-REF
+          (progn
+            (record-cycle-path (cons name *eval-stack*))
+            (error "循環参照を検出: ~a" name))
           (let ((cell (get-cell name)))
             (cell-value cell))))))
 
 (defun rel (drow dcol)
-  "現在のセルからの相対位置のセル値を取得"
+  "現在のセルからの相対位置のセル値を取得
+   v0.7.1: 循環パス記録を追加"
   (let* ((new-col (+ (eval-col) dcol))
          (new-row (+ (eval-row) drow))
          (name (cell-name new-col new-row)))
     (if (and (>= new-col 0) (< new-col (sheet-cols))
              (>= new-row 0) (< new-row (sheet-rows)))
-        ;; 循環参照チェック
+        ;; 循環参照チェック (v0.7.1 強化)
         (if (eval-stack-member name)
-            :CIRCULAR-REF
+            (progn
+              (record-cycle-path (cons name *eval-stack*))
+              (error "循環参照を検出: ~a (rel ~d ~d)" name drow dcol))
             (let ((cell (get-cell name)))
               (cell-value cell)))
         ;; 範囲外はNIL
         nil)))
 
 (defun rel-range (dr1 dc1 dr2 dc2)
-  "相対位置で範囲を指定して値のリストを取得"
+  "相対位置で範囲を指定して値のリストを取得
+   v0.7.1: 循環参照チェック強化"
   (let* ((r1 (+ (eval-row) dr1))
          (c1 (+ (eval-col) dc1))
          (r2 (+ (eval-row) dr2))
@@ -321,62 +342,68 @@
 
 (defun eval-formula (expr)
   "S式の数式を評価。Lispの非破壊関数をサポート。
+   v0.7.1: 評価深さ制限を追加
    戻り値: 数値、文字列、リスト、シンボルなど任意のLisp値"
-  (cond
-    ;; nil
-    ((null expr) nil)
-    ;; 数値・文字列はそのまま
-    ((numberp expr) expr)
-    ((stringp expr) expr)
-    ;; キーワードシンボルはそのまま
-    ((keywordp expr) expr)
-    ;; クォートされた式
-    ((and (listp expr) (eq (car expr) 'quote))
-     (cadr expr))
-    ;; シンボルの場合：lambda変数 > セル参照 > 定数 > そのまま
-    ((symbolp expr)
-     (multiple-value-bind (val found) (lookup-var expr)
-       (cond
-         ;; lambda変数に見つかった
-         (found val)
-         ;; セル参照
-         ((cell-ref-p expr)
-          (let ((val (get-cell-by-symbol expr)))
-            (if (stringp val) (try-parse-number val) val)))
-         ;; PI定数
-         ((string-equal (symbol-name expr) "PI") pi)
-         ;; その他のシンボルはそのまま
-         (t expr))))
-    ;; リスト（関数呼び出し）
-    ((listp expr)
-     (let* ((op (car expr))
-            (op-name (if (symbolp op) (string-upcase (symbol-name op)) "")))
-       (cond
-         ;; ((lambda (x) ...) args...) - lambda式の直接呼び出し
-         ((and (listp op)
-               (symbolp (car op))
-               (string-equal (symbol-name (car op)) "LAMBDA"))
-          (let ((fn (eval-formula op))
-                (args (mapcar #'eval-formula (cdr expr))))
-            (if (functionp fn)
-                (apply fn args)
-                (format nil "ERR: not a function"))))
-         ;; LAMBDA - 無名関数を作成
-         ((string-equal op-name "LAMBDA")
-          (let ((params (cadr expr))
-                (body (caddr expr)))
-            ;; クロージャとして現在の環境をキャプチャ
-            (let ((captured-env *lambda-env*))
-              (lambda (&rest args)
-                (let ((*lambda-env* (append (mapcar #'make-binding
-                                                    (mapcar #'symbol-name params)
-                                                    args)
-                                            captured-env)))
-                  (eval-formula body))))))
-         ;; 範囲指定 (range A1 A5)
-         ((string-equal op-name "RANGE")
-          (if (and (>= (length expr) 3)
-                   (cell-ref-p (cadr expr))
+  ;; 深さチェック (v0.7.1)
+  (incf *current-eval-depth*)
+  (unwind-protect
+      (progn
+        (check-eval-depth)
+        (cond
+          ;; nil
+          ((null expr) nil)
+          ;; 数値・文字列はそのまま
+          ((numberp expr) expr)
+          ((stringp expr) expr)
+          ;; キーワードシンボルはそのまま
+          ((keywordp expr) expr)
+          ;; クォートされた式
+          ((and (listp expr) (eq (car expr) 'quote))
+           (cadr expr))
+          ;; シンボルの場合：lambda変数 > セル参照 > 定数 > そのまま
+          ((symbolp expr)
+           (multiple-value-bind (val found) (lookup-var expr)
+             (cond
+               ;; lambda変数に見つかった
+               (found val)
+               ;; セル参照
+               ((cell-ref-p expr)
+                (let ((val (get-cell-by-symbol expr)))
+                  (if (stringp val) (try-parse-number val) val)))
+               ;; PI定数
+               ((string-equal (symbol-name expr) "PI") pi)
+               ;; その他のシンボルはそのまま
+               (t expr))))
+          ;; リスト（関数呼び出し）
+          ((listp expr)
+           (let* ((op (car expr))
+                  (op-name (if (symbolp op) (string-upcase (symbol-name op)) "")))
+             (cond
+               ;; ((lambda (x) ...) args...) - lambda式の直接呼び出し
+               ((and (listp op)
+                     (symbolp (car op))
+                     (string-equal (symbol-name (car op)) "LAMBDA"))
+                (let ((fn (eval-formula op))
+                      (args (mapcar #'eval-formula (cdr expr))))
+                  (if (functionp fn)
+                      (apply fn args)
+                      (format nil "ERR: not a function"))))
+               ;; LAMBDA - 無名関数を作成
+               ((string-equal op-name "LAMBDA")
+                (let ((params (cadr expr))
+                      (body (caddr expr)))
+                  ;; クロージャとして現在の環境をキャプチャ
+                  (let ((captured-env *lambda-env*))
+                    (lambda (&rest args)
+                      (let ((*lambda-env* (append (mapcar #'make-binding
+                                                          (mapcar #'symbol-name params)
+                                                          args)
+                                                  captured-env)))
+                        (eval-formula body))))))
+               ;; 範囲指定 (range A1 A5)
+               ((string-equal op-name "RANGE")
+                (if (and (>= (length expr) 3)
+                         (cell-ref-p (cadr expr))
                    (cell-ref-p (caddr expr)))
               (expand-range (cadr expr) (caddr expr))
               :error))
@@ -713,8 +740,10 @@
                 (format nil "ERR:~A undefined" op-name))))
          ;; 許可されていない関数
          (t (format nil "ERR:~A not allowed" op-name)))))
-    ;; その他
-    (t expr)))
+          ;; その他
+          (t expr)))
+    ;; 深さカウンタを戻す (v0.7.1)
+    (decf *current-eval-depth*)))
 
 ;;;; =========================
 ;;;; 値の表示

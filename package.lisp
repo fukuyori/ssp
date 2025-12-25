@@ -1,5 +1,7 @@
 ;;;; package.lisp
-;;;; SSP - パッケージ定義、定数、構造体、アクセサ
+;;;; SSP v0.7.1 - パッケージ定義、定数、構造体、アクセサ
+;;;; v0.7: 日本語・Unicode対応
+;;;; v0.7.1: 循環参照検出改善、パフォーマンス最適化
 
 ;; パッケージ再読み込み時のエラー回避
 (when (find-package :ssexp)
@@ -11,8 +13,14 @@
   (:export 
    ;; 起動
    #:start 
+   ;; バージョン情報 (v0.7)
+   #:*ssp-version* #:version-info
    ;; デバッグ
    #:show-dependencies #:show-cell-deps
+   ;; キャッシュ・パフォーマンス (v0.7.1)
+   #:clear-cache #:show-cache-stats #:*enable-cache*
+   ;; 循環参照 (v0.7.1)
+   #:detect-cycles #:show-cycle-path
    ;; ファイル操作
    #:save #:load-file #:new-sheet
    #:export-csv #:import-csv
@@ -28,6 +36,10 @@
    #:+min-cell-w+ #:+min-cell-h+
    #:+header-h+ #:+header-w+
    #:+max-undo-history+
+   ;; フォント設定 (v0.7)
+   #:*font-family* #:*font-size*
+   ;; 文字幅計算 (v0.7)
+   #:char-display-width #:string-display-width #:truncate-to-display-width
    ;; アクセサ - シートサイズ
    #:sheet-rows #:sheet-cols
    ;; アクセサ - カーソル
@@ -50,6 +62,195 @@
    ;; 後方互換（段階的に廃止）
    #:*current-file* #:*rows* #:*cols*))
 (in-package :ssexp)
+
+;;;; =========================
+;;;; バージョン情報 (v0.7.1)
+;;;; =========================
+
+(defparameter *ssp-version* "0.7.1")
+
+(defun version-info ()
+  "バージョン情報を返す"
+  (format nil "SSP v~a - Symbolic Spreadsheet for Lisp Learning~%~
+               Features: japanese-support, unicode-display, utf8-file-io, cjk-fonts,~%~
+                         improved-cycle-detection, evaluation-cache, performance-optimization"
+          *ssp-version*))
+
+;;;; =========================
+;;;; フォント設定 (v0.7)
+;;;; =========================
+
+(defparameter *font-family*
+  #+darwin "Menlo"
+  #+windows "MS Gothic"
+  #-(or darwin windows) "Noto Sans Mono CJK JP"
+  "デフォルトの等幅フォント（Unicode/CJK対応）")
+
+(defparameter *font-family-fallback*
+  '("Noto Sans Mono CJK JP"
+    "Source Han Code JP"
+    "IPAGothic"
+    "VL Gothic"
+    "DejaVu Sans Mono"
+    "Consolas"
+    "Courier")
+  "フォールバックフォントリスト")
+
+(defparameter *font-size* 11
+  "デフォルトフォントサイズ")
+
+;;;; =========================
+;;;; 評価キャッシュ (v0.7.1 新規)
+;;;; =========================
+
+(defparameter *enable-cache* t
+  "評価キャッシュを有効にするか")
+
+(defparameter *eval-cache* (make-hash-table :test #'equal)
+  "セル評価結果のキャッシュ: セル名 → (値 . 評価世代)")
+
+(defparameter *dirty-cells* (make-hash-table :test #'equal)
+  "変更されたセルのフラグ: セル名 → t")
+
+(defparameter *eval-generation* 0
+  "評価世代（キャッシュ無効化用）")
+
+(defun clear-cache ()
+  "評価キャッシュをクリア"
+  (clrhash *eval-cache*)
+  (clrhash *dirty-cells*)
+  (incf *eval-generation*))
+
+(defun mark-dirty (cell-name)
+  "セルを変更済みとしてマーク"
+  (setf (gethash cell-name *dirty-cells*) t)
+  ;; キャッシュを無効化
+  (remhash cell-name *eval-cache*))
+
+(defun is-dirty-p (cell-name)
+  "セルが変更済みかどうか"
+  (gethash cell-name *dirty-cells*))
+
+(defun clear-dirty (cell-name)
+  "セルの変更フラグをクリア"
+  (remhash cell-name *dirty-cells*))
+
+(defun get-cached-value (cell-name)
+  "キャッシュから値を取得（有効な場合）"
+  (when *enable-cache*
+    (let ((cached (gethash cell-name *eval-cache*)))
+      (when (and cached (= (cdr cached) *eval-generation*))
+        (car cached)))))
+
+(defun set-cached-value (cell-name value)
+  "値をキャッシュに保存"
+  (when *enable-cache*
+    (setf (gethash cell-name *eval-cache*) 
+          (cons value *eval-generation*))))
+
+(defparameter *cache-hits* 0)
+(defparameter *cache-misses* 0)
+
+(defun show-cache-stats ()
+  "キャッシュ統計を表示"
+  (format t "~%=== Cache Statistics ===~%")
+  (format t "Enabled: ~a~%" *enable-cache*)
+  (format t "Generation: ~a~%" *eval-generation*)
+  (format t "Cached entries: ~a~%" (hash-table-count *eval-cache*))
+  (format t "Dirty cells: ~a~%" (hash-table-count *dirty-cells*))
+  (format t "Cache hits: ~a~%" *cache-hits*)
+  (format t "Cache misses: ~a~%" *cache-misses*)
+  (when (> (+ *cache-hits* *cache-misses*) 0)
+    (format t "Hit rate: ~,1f%~%" 
+            (* 100.0 (/ *cache-hits* (+ *cache-hits* *cache-misses*))))))
+
+;;;; =========================
+;;;; 循環参照検出 (v0.7.1 強化)
+;;;; =========================
+
+(defparameter *cycle-path* nil
+  "検出された循環パス")
+
+(defparameter *max-eval-depth* 100
+  "最大評価深さ（無限ループ防止）")
+
+(defun record-cycle-path (path)
+  "循環パスを記録"
+  (setf *cycle-path* (reverse path)))
+
+(defun show-cycle-path ()
+  "最後に検出された循環パスを表示"
+  (if *cycle-path*
+      (progn
+        (format t "~%=== Circular Reference Detected ===~%")
+        (format t "Path: ~{~a~^ → ~}~%" *cycle-path*)
+        (format t "Cycle closes at: ~a~%" (car (last *cycle-path*))))
+      (format t "No circular reference detected.~%")))
+
+(defun format-cycle-error (cell-name path)
+  "循環参照エラーメッセージをフォーマット"
+  (let ((cycle-str (format nil "~{~a~^→~}" (reverse path))))
+    (format nil "#循環: ~a (~a)" cell-name cycle-str)))
+
+;;;; =========================
+;;;; 文字幅計算 (v0.7 新規)
+;;;; =========================
+
+(defun char-display-width (char)
+  "文字の表示幅を返す（半角=1, 全角=2）"
+  (let ((code (char-code char)))
+    (cond
+      ;; ASCII printable (0x20-0x7E) -> 半角
+      ((<= #x0020 code #x007E) 1)
+      ;; 半角カナ (0xFF61-0xFF9F) -> 半角
+      ((<= #xFF61 code #xFF9F) 1)
+      ;; CJK統合漢字
+      ((<= #x4E00 code #x9FFF) 2)
+      ;; ひらがな
+      ((<= #x3040 code #x309F) 2)
+      ;; カタカナ
+      ((<= #x30A0 code #x30FF) 2)
+      ;; CJK記号・句読点
+      ((<= #x3000 code #x303F) 2)
+      ;; 全角英数
+      ((<= #xFF01 code #xFF5E) 2)
+      ;; 全角括弧等
+      ((<= #xFF5F code #xFF60) 2)
+      ;; ハングル
+      ((<= #xAC00 code #xD7AF) 2)
+      ;; CJK互換
+      ((<= #x3300 code #x33FF) 2)
+      ((<= #xFE30 code #xFE4F) 2)
+      ;; 囲みCJK
+      ((<= #x3200 code #x32FF) 2)
+      ;; CJK拡張A
+      ((<= #x3400 code #x4DBF) 2)
+      ;; CJK拡張B以降（補助面）
+      ((>= code #x20000) 2)
+      ;; デフォルト: 半角
+      (t 1))))
+
+(defun string-display-width (str)
+  "文字列の合計表示幅を計算"
+  (loop for char across str
+        sum (char-display-width char)))
+
+(defun truncate-to-display-width (str max-width &optional (suffix "…"))
+  "文字列を指定した表示幅に切り詰める"
+  (let ((suffix-width (string-display-width suffix))
+        (current-width 0)
+        (result '()))
+    (loop for char across str
+          for char-width = (char-display-width char)
+          while (<= (+ current-width char-width suffix-width) max-width)
+          do (progn
+               (push char result)
+               (incf current-width char-width)))
+    (if (= (length result) (length str))
+        str  ; 切り詰め不要
+        (concatenate 'string 
+                     (coerce (nreverse result) 'string)
+                     suffix))))
 
 ;;;; =========================
 ;;;; 定数（再読み込み対応のためdefparameterを使用）
