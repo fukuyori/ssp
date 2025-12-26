@@ -72,7 +72,7 @@
 ;;;; バージョン情報 (v0.7.2)
 ;;;; =========================
 
-(defparameter *ssp-version* "0.8.0")
+(defparameter *ssp-version* "0.8.1")
 
 (defun version-info ()
   "バージョン情報を返す"

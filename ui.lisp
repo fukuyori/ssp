@@ -1,5 +1,5 @@
 ;;;; ui.lisp
-;;;; SSP v0.8.0 - 描画、入力処理、シンタックスハイライト
+;;;; SSP v0.8.1 - 描画、入力処理、シンタックスハイライト
 ;;;; v0.7: 日本語・Unicode対応（フォント設定、文字幅計算）
 ;;;; v0.7.3: バッチ描画によるパフォーマンス改善
 ;;;; v0.7.4: 大規模シート対応（最大10000行）
@@ -7,6 +7,7 @@
 ;;;; v0.7.6: 表示範囲計算の実装
 ;;;; v0.7.7: 仮想スクロール描画（表示範囲のみ描画）
 ;;;; v0.8.0: 差分更新（変更セルのみ再描画）
+;;;; v0.8.1: デフォルト200x16、テキストはみ出し表示
 
 (in-package :ssexp)
 
@@ -82,35 +83,22 @@
         count t))
 
 (defun draw-cell-text (canvas x y val)
-  "セルのテキストのみを描画（数値は右寄せ、それ以外は左寄せ）
-   v0.7: 日本語フォント対応、文字幅を考慮した切り詰め"
+  "セルのテキストのみを描画（数値は右寄せ、それ以外は左寄せ、はみ出し表示対応）"
   (when val
     (let* ((px (col-left x))
            (py (row-top y))
            (w (col-width x))
            (h (row-height y))
            (raw-text (format-value val))
-           ;; 全角文字を考慮して保守的に計算（全角=14px, 半角=7px として表示幅2=14px）
-           (available-width (- w 12))  ; 左右マージン6pxずつ
-           (char-pixel-width 7)        ; 半角文字の幅（表示幅1=7px）
-           (available-chars (floor available-width char-pixel-width))
-           ;; 表示幅が利用可能幅を超える場合は切り詰め
-           (display-text (if (> (string-display-width raw-text) available-chars)
-                             (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
-                             raw-text))
            (path (widget-path canvas))
-           ;; 数値かどうか
            (is-number (numberp val))
-           ;; フォント設定
-           (font-spec (format nil "{~a} ~a" *font-family* *font-size*)))
-      ;; 数値は右寄せ、それ以外は左寄せ
+           (font-spec (format nil "{~a} ~a" *font-family* *font-size*))
+           (safe-text (escape-tcl-string raw-text)))
       (if is-number
-          ;; 右寄せ（anchor: e）
           (format-wish "~a create text ~a ~a -anchor e -text {~a} -font {~a}"
-                       path (+ px w -6) (+ py (floor h 2)) display-text font-spec)
-          ;; 左寄せ（anchor: w）
+                       path (+ px w -6) (+ py (floor h 2)) safe-text font-spec)
           (format-wish "~a create text ~a ~a -anchor w -text {~a} -font {~a}"
-                       path (+ px 6) (+ py (floor h 2)) display-text font-spec)))))
+                       path (+ px 6) (+ py (floor h 2)) safe-text font-spec)))))
 
 (defun draw-corner (canvas)
   "左上コーナーを描画（固定）"
@@ -415,28 +403,22 @@
                  path px py px2 py2 bg)))
 
 (defun draw-cell-text-offset (canvas x y val offset-x offset-y)
-  "セルのテキストのみを描画（オフセット指定版）- 非バッチ用"
+  "セルのテキストのみを描画（オフセット指定版、はみ出し表示対応）"
   (when val
     (let* ((px (- (col-left x) offset-x))
            (py (- (row-top y) offset-y))
            (w (col-width x))
            (h (row-height y))
            (raw-text (format-value val))
-           ;; 全角文字を考慮して保守的に計算（全角=14px, 半角=7px として表示幅2=14px）
-           (available-width (- w 12))  ; 左右マージン6pxずつ
-           (char-pixel-width 7)        ; 半角文字の幅（表示幅1=7px）
-           (available-chars (floor available-width char-pixel-width))
-           (display-text (if (> (string-display-width raw-text) available-chars)
-                            (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
-                            raw-text))
            (path (widget-path canvas))
            (is-number (numberp val))
-           (font-spec (format nil "{~a} ~a" *font-family* *font-size*)))
+           (font-spec (format nil "{~a} ~a" *font-family* *font-size*))
+           (safe-text (escape-tcl-string raw-text)))
       (if is-number
           (format-wish "~a create text ~a ~a -anchor e -text {~a} -font {~a}"
-                       path (+ px w -6) (+ py (floor h 2)) display-text font-spec)
+                       path (+ px w -6) (+ py (floor h 2)) safe-text font-spec)
           (format-wish "~a create text ~a ~a -anchor w -text {~a} -font {~a}"
-                       path (+ px 6) (+ py (floor h 2)) display-text font-spec)))))
+                       path (+ px 6) (+ py (floor h 2)) safe-text font-spec)))))
 
 (defun make-cell-bg-command (path x y val selected in-selection offset-x offset-y)
   "セル背景描画コマンドを生成（バッチ用 v0.7.3）"
@@ -464,23 +446,16 @@
             path px py px2 py2 bg tag)))
 
 (defun make-cell-text-command (path x y val offset-x offset-y)
-  "セルテキスト描画コマンドを生成（バッチ用 v0.7.3）"
+  "セルテキスト描画コマンドを生成（バッチ用、はみ出し表示対応）"
   (when val
     (let* ((px (- (col-left x) offset-x))
            (py (- (row-top y) offset-y))
            (w (col-width x))
            (h (row-height y))
            (raw-text (format-value val))
-           (available-width (- w 12))
-           (char-pixel-width 7)
-           (available-chars (floor available-width char-pixel-width))
-           (display-text (if (> (string-display-width raw-text) available-chars)
-                            (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
-                            raw-text))
            (is-number (numberp val))
            (font-spec (format nil "{~a} ~a" *font-family* *font-size*))
-           ;; テキスト内の特殊文字をエスケープ
-           (safe-text (escape-tcl-string display-text)))
+           (safe-text (escape-tcl-string raw-text)))
       (if is-number
           (format nil "~a create text ~a ~a -anchor e -text {~a} -font {~a}"
                   path (+ px w -6) (+ py (floor h 2)) safe-text font-spec)
@@ -488,22 +463,16 @@
                   path (+ px 6) (+ py (floor h 2)) safe-text font-spec)))))
 
 (defun make-cell-text-command-tagged (path x y val offset-x offset-y)
-  "セルテキスト描画コマンドを生成（タグ付き v0.8.0）"
+  "セルテキスト描画コマンドを生成（タグ付き v0.8.0、はみ出し表示対応）"
   (when val
     (let* ((px (- (col-left x) offset-x))
            (py (- (row-top y) offset-y))
            (w (col-width x))
            (h (row-height y))
            (raw-text (format-value val))
-           (available-width (- w 12))
-           (char-pixel-width 7)
-           (available-chars (floor available-width char-pixel-width))
-           (display-text (if (> (string-display-width raw-text) available-chars)
-                            (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
-                            raw-text))
            (is-number (numberp val))
            (font-spec (format nil "{~a} ~a" *font-family* *font-size*))
-           (safe-text (escape-tcl-string display-text))
+           (safe-text (escape-tcl-string raw-text))
            (tag (format nil "cell_~d_~d" x y)))
       (if is-number
           (format nil "~a create text ~a ~a -anchor e -text {~a} -font {~a} -tags ~a"
@@ -615,7 +584,7 @@
               (push (format nil "~a create rectangle ~a ~a ~a ~a -fill {~a} -outline gray"
                             path px py (+ px w) (+ py h) bg)
                     commands))))
-        ;; パス2: 全セルのテキストコマンドを収集
+        ;; パス2: 全セルのテキストコマンドを収集（はみ出し表示対応）
         (let ((font-spec (format nil "{~a} ~a" *font-family* *font-size*)))
           (dotimes (y (sheet-rows))
             (dotimes (x (sheet-cols))
@@ -626,12 +595,7 @@
                          (w (col-width x))
                          (h (row-height y))
                          (raw-text (format-value val))
-                         (available-width (- w 12))
-                         (available-chars (floor available-width 7))
-                         (display-text (if (> (string-display-width raw-text) available-chars)
-                                          (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
-                                          raw-text))
-                         (safe-text (escape-tcl-string display-text)))
+                         (safe-text (escape-tcl-string raw-text)))
                     (if (numberp val)
                         (push (format nil "~a create text ~a ~a -anchor e -text {~a} -font {~a}"
                                       path (+ px w -6) (+ py (floor h 2)) safe-text font-spec)
