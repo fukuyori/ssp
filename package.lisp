@@ -1,7 +1,8 @@
 ;;;; package.lisp
-;;;; SSP v0.7.1 - パッケージ定義、定数、構造体、アクセサ
+;;;; SSP v0.7.2 - パッケージ定義、定数、構造体、アクセサ
 ;;;; v0.7: 日本語・Unicode対応
 ;;;; v0.7.1: 循環参照検出改善、パフォーマンス最適化
+;;;; v0.7.2: シートサイズ上限設定（1000行×26列）
 
 ;; パッケージ再読み込み時のエラー回避
 (when (find-package :ssexp)
@@ -36,6 +37,10 @@
    #:+min-cell-w+ #:+min-cell-h+
    #:+header-h+ #:+header-w+
    #:+max-undo-history+
+   ;; サイズ制限 (v0.7.2)
+   #:+max-rows+ #:+max-cols+
+   #:+default-rows+ #:+default-cols+
+   #:+visible-rows+ #:+visible-cols+
    ;; フォント設定 (v0.7)
    #:*font-family* #:*font-size*
    ;; 文字幅計算 (v0.7)
@@ -64,17 +69,68 @@
 (in-package :ssexp)
 
 ;;;; =========================
-;;;; バージョン情報 (v0.7.1)
+;;;; バージョン情報 (v0.7.2)
 ;;;; =========================
 
-(defparameter *ssp-version* "0.7.1")
+(defparameter *ssp-version* "0.7.2")
 
 (defun version-info ()
   "バージョン情報を返す"
   (format nil "SSP v~a - Symbolic Spreadsheet for Lisp Learning~%~
                Features: japanese-support, unicode-display, utf8-file-io, cjk-fonts,~%~
-                         improved-cycle-detection, evaluation-cache, performance-optimization"
-          *ssp-version*))
+                         improved-cycle-detection, evaluation-cache,~%~
+                         grid-size-limit (~d rows × ~d cols)"
+          *ssp-version* +max-rows+ +max-cols+))
+
+;;;; =========================
+;;;; シートサイズ制限 (v0.7.2 新規)
+;;;; =========================
+
+(defconstant +max-rows+ 1000
+  "最大行数（パフォーマンス制限）")
+
+(defconstant +max-cols+ 26
+  "最大列数（A-Z、セル名形式制限）")
+
+(defconstant +min-col-width+ 20
+  "最小列幅（ピクセル）")
+
+(defconstant +min-row-height+ 15
+  "最小行高さ（ピクセル）")
+
+(defconstant +default-rows+ 40
+  "デフォルト行数")
+
+(defconstant +default-cols+ 12
+  "デフォルト列数")
+
+(defconstant +visible-rows+ 30
+  "表示行数（ウィンドウサイズ制限）")
+
+(defconstant +visible-cols+ 14
+  "表示列数（ウィンドウサイズ制限）")
+
+(defun validate-grid-size (rows cols)
+  "グリッドサイズを検証し、制限内に収める
+   戻り値: (validated-rows validated-cols warnings)"
+  (let ((warnings nil)
+        (valid-rows rows)
+        (valid-cols cols))
+    ;; 行数チェック
+    (when (> rows +max-rows+)
+      (setf valid-rows +max-rows+)
+      (push (format nil "行数を~dから~dに制限しました" rows +max-rows+) warnings))
+    (when (< rows 1)
+      (setf valid-rows +default-rows+)
+      (push (format nil "行数を~dに設定しました" +default-rows+) warnings))
+    ;; 列数チェック
+    (when (> cols +max-cols+)
+      (setf valid-cols +max-cols+)
+      (push (format nil "列数を~dから~dに制限しました（A-Z形式制限）" cols +max-cols+) warnings))
+    (when (< cols 1)
+      (setf valid-cols +default-cols+)
+      (push (format nil "列数を~dに設定しました" +default-cols+) warnings))
+    (values valid-rows valid-cols (nreverse warnings))))
 
 ;;;; =========================
 ;;;; フォント設定 (v0.7)
@@ -327,6 +383,22 @@
 (defparameter *resize* (make-resize-state))
 (defparameter *clip* (make-clipboard-data))
 (defparameter *eval-ctx* (make-eval-context))
+
+;;;; =========================
+;;;; キャンバス参照 (v0.7.2)
+;;;; =========================
+
+(defparameter *corner-canvas* nil "左上コーナーキャンバス")
+(defparameter *col-header-canvas* nil "列ヘッダーキャンバス")
+(defparameter *row-header-canvas* nil "行ヘッダーキャンバス")
+(defparameter *main-canvas* nil "メインセルキャンバス")
+
+;;;; =========================
+;;;; スクロール状態 (v0.7.2 改善)
+;;;; =========================
+
+(defparameter *scroll-x* 0 "水平スクロール位置（ピクセル）")
+(defparameter *scroll-y* 0 "垂直スクロール位置（ピクセル）")
 
 ;;;; =========================
 ;;;; 後方互換性のためのグローバル変数

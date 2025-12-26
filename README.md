@@ -3,12 +3,60 @@
 **SSP is not a notebook.**  
 **It is a Lisp-native evaluation space where cells are expressions, not scripts.**
 
-![Version](https://img.shields.io/badge/version-0.7.1-blue.svg)
+![Version](https://img.shields.io/badge/version-0.7.2-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Lisp](https://img.shields.io/badge/Common%20Lisp-SBCL-red.svg)
 ![GUI](https://img.shields.io/badge/GUI-LTK%2FTk-orange.svg)
 
 [日本語版 README](README-JP.md)
+
+---
+
+## What's New in v0.7.2
+
+### Grid Size Limits
+
+- **Maximum rows**: 1000 (for UI performance)
+- **Maximum columns**: 26 (A-Z, cell name format limitation)
+- **Default grid**: 100 rows × 26 columns
+- **Visible area**: 30 rows × 14 columns (with scrollbars)
+- **Validation on startup**: `(start :rows 2000)` → automatically limited to 1000
+- **Validation on import**: CSV/SSP files exceeding limits are truncated with warnings
+
+### Scrollbars
+
+- Horizontal and vertical scrollbars for navigating large sheets
+- Auto-scroll when cursor moves outside visible area
+- Fixed row/column headers during scroll
+- Scroll region updates automatically on file load/import
+
+### Scroll Controls
+
+- **Mouse wheel**: Vertical scroll
+- **Shift + Mouse wheel**: Horizontal scroll
+- **Page Up/Down**: Scroll by page
+- **Ctrl+Home**: Go to top-left
+- **Ctrl+End**: Go to bottom-right
+
+### Size Constants
+
+```lisp
++max-rows+      ; 1000 - Maximum row count
++max-cols+      ; 26   - Maximum column count (A-Z)
++default-rows+  ; 100  - Default row count
++default-cols+  ; 26   - Default column count (A-Z)
++visible-rows+  ; 30   - Visible row count in window
++visible-cols+  ; 14   - Visible column count in window
+```
+
+### Enhanced CSV Import
+
+```lisp
+(import-csv "data.csv"
+  :expand-grid t      ; Auto-expand grid to fit data (default)
+  :max-rows 500       ; Custom row limit
+  :max-cols 20)       ; Custom column limit
+```
 
 ---
 
@@ -389,6 +437,7 @@ ssp/
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 0.7.2 | 2025-12 | Grid size limits (1000×26), scrollbars, default 100×26, visible 30×14 |
 | 0.7.1 | 2025-12 | Improved circular reference detection, evaluation cache, performance optimization |
 | 0.7 | 2025-12 | Japanese/Unicode support, CJK fonts, character width calculation, UTF-8 BOM for CSV |
 | 0.6 | 2025-12 | Structure-based architecture, accessor functions, modular split, renamed to SSP |

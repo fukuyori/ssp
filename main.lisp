@@ -1,7 +1,8 @@
 ;;;; main.lisp
-;;;; SSP v0.7.1 - メインGUI、start関数、イベントハンドラ
+;;;; SSP v0.7.2 - メインGUI、start関数、イベントハンドラ
 ;;;; v0.7: 日本語・Unicode対応
 ;;;; v0.7.1: 循環参照検出改善、パフォーマンス最適化
+;;;; v0.7.2: シートサイズ上限設定（1000行×26列）
 
 (in-package :ssexp)
 
@@ -22,26 +23,31 @@
   "起動メッセージを表示"
   (format t "~%")
   (format t "╔══════════════════════════════════════════════════════════════╗~%")
-  (format t "║  SSP v~a - Symbolic Spreadsheet for Lisp Learning         ║~%" *ssp-version*)
+  (format t "║  SSP v~a - Symbolic Spreadsheet for Lisp Learning       ║~%" *ssp-version*)
   (format t "╠══════════════════════════════════════════════════════════════╣~%")
-  (format t "║  New in v0.7.1:                                              ║~%")
-  (format t "║  • Improved circular reference detection with path display   ║~%")
-  (format t "║  • Evaluation cache for better performance                   ║~%")
-  (format t "║  • Evaluation depth limit to prevent infinite loops          ║~%")
-  (format t "║  • Topological sort with cycle warning                       ║~%")
+  (format t "║  Grid: ~4d rows × ~2d cols (max ~d×~d)                        ║~%" 
+          +default-rows+ +default-cols+ +max-rows+ +max-cols+)
+  (format t "║  View: ~4d rows × ~2d cols (with scrollbars)                  ║~%" 
+          +visible-rows+ +visible-cols+)
   (format t "║                                                              ║~%")
-  (format t "║  Commands: (detect-cycles) (show-cache-stats)                ║~%")
+  (format t "║  Commands: (detect-cycles) (show-cache-stats) (version-info) ║~%")
   (format t "╚══════════════════════════════════════════════════════════════╝~%")
   (format t "~%"))
 
-(defun start (&key (rows 26) (cols 14) (input-lines 3))
+(defun start (&key (rows +default-rows+) (cols +default-cols+) (input-lines 3))
   "スプレッドシートを起動
-   :rows        行数（デフォルト26）
-   :cols        列数（デフォルト14、最大26=A-Z）
+   :rows        行数（デフォルト100、最大1000）
+   :cols        列数（デフォルト26、最大26=A-Z）
    :input-lines 入力欄の行数（デフォルト3）"
-  ;; パラメータ設定
-  (setf (sheet-rows) rows)
-  (setf (sheet-cols) (min cols 26))  ; 最大26列（A-Z）
+  ;; パラメータ検証 (v0.7.2)
+  (multiple-value-bind (valid-rows valid-cols warnings)
+      (validate-grid-size rows cols)
+    ;; 警告表示
+    (dolist (w warnings)
+      (format t "Warning: ~a~%" w))
+    ;; パラメータ設定
+    (setf (sheet-rows) valid-rows)
+    (setf (sheet-cols) valid-cols))
   
   ;; 初期化
   (reset-sheet)
@@ -75,10 +81,34 @@
                                         :orientation :vertical))
            ;; スプレッドシート用フレーム
            (canvas-frame (make-instance 'frame))
+           ;; スクロールバー (v0.7.2)
+           (canvas-vscroll (make-instance 'scrollbar 
+                                          :master canvas-frame
+                                          :orientation :vertical))
+           (canvas-hscroll (make-instance 'scrollbar 
+                                          :master canvas-frame
+                                          :orientation :horizontal))
+           ;; 4つのキャンバス（ヘッダー固定対応 v0.7.2）
+           ;; 左上コーナー（固定）
+           (corner-canvas (make-instance 'canvas
+                                         :master canvas-frame
+                                         :width +header-w+
+                                         :height +header-h+))
+           ;; 列ヘッダー（横スクロール連動）
+           (col-header-canvas (make-instance 'canvas
+                                             :master canvas-frame
+                                             :width (- (visible-width) +header-w+)
+                                             :height +header-h+))
+           ;; 行ヘッダー（縦スクロール連動）
+           (row-header-canvas (make-instance 'canvas
+                                             :master canvas-frame
+                                             :width +header-w+
+                                             :height (- (visible-height) +header-h+)))
+           ;; メインセル（両方向スクロール）
            (canvas (make-instance 'canvas
                                   :master canvas-frame
-                                  :width (total-width)
-                                  :height (total-height)))
+                                  :width (- (visible-width) +header-w+)
+                                  :height (- (visible-height) +header-h+)))
            ;; メニューバー
            (mb (make-menubar))
            (file-menu (make-menu mb "File"))
@@ -89,6 +119,7 @@
                        (lambda ()
                          (new-sheet)
                          (update-window-title)
+                         (update-scroll-region canvas)
                          (update-text-input input-text)
                          (redraw canvas)))
       
@@ -102,6 +133,7 @@
                                  (progn
                                    (load-file filename)
                                    (update-window-title)
+                                   (update-scroll-region canvas)
                                    (update-text-input input-text)
                                    (redraw canvas))
                                (error (e)
@@ -155,6 +187,7 @@
                                  (progn
                                    (import-csv filename)
                                    (update-window-title)
+                                   (update-scroll-region canvas)
                                    (update-text-input input-text)
                                    (redraw canvas)
                                    (do-msg (format nil "Imported: ~a" 
@@ -356,8 +389,85 @@
       ;; レイアウト - 入力フレーム内
       (pack input-scroll :side :right :fill :y)
       (pack input-text :side :left :fill :both :expand t)
-      ;; レイアウト - キャンバスフレーム内
-      (pack canvas :fill :both :expand t)
+      
+      ;; レイアウト - キャンバスフレーム内（4キャンバス＋スクロールバー v0.7.2）
+      ;; スクロール領域を設定
+      (let ((cells-width (- (total-width) +header-w+))
+            (cells-height (- (total-height) +header-h+)))
+        ;; 列ヘッダーのスクロール領域（横スクロール連動）
+        (format-wish "~a configure -scrollregion {0 0 ~d ~d}"
+                     (widget-path col-header-canvas) cells-width +header-h+)
+        ;; 行ヘッダーのスクロール領域（縦スクロール連動）
+        (format-wish "~a configure -scrollregion {0 0 ~d ~d}"
+                     (widget-path row-header-canvas) +header-w+ cells-height)
+        ;; メインキャンバスのスクロール領域
+        (format-wish "~a configure -scrollregion {0 0 ~d ~d}"
+                     (widget-path canvas) cells-width cells-height))
+      
+      ;; スクロール連動の設定 (v0.7.2 改善)
+      ;; Tcl側でスクロール処理を行い、再描画時にLisp側で位置を更新
+      (format-wish "proc scroll_y {args} {
+          ~a yview {*}$args
+          ~a yview {*}$args
+      }" (widget-path canvas) (widget-path row-header-canvas))
+      (configure canvas-vscroll :command "scroll_y")
+      
+      (format-wish "proc scroll_x {args} {
+          ~a xview {*}$args
+          ~a xview {*}$args
+      }" (widget-path canvas) (widget-path col-header-canvas))
+      (configure canvas-hscroll :command "scroll_x")
+      
+      ;; Windows/Mac用MouseWheelハンドラ
+      (format-wish "proc ssp_wheel_y {delta} {
+          if {$delta > 0} {
+              scroll_y scroll -3 units
+          } else {
+              scroll_y scroll 3 units
+          }
+      }")
+      (format-wish "proc ssp_wheel_x {delta} {
+          if {$delta > 0} {
+              scroll_x scroll -3 units
+          } else {
+              scroll_x scroll 3 units
+          }
+      }")
+      
+      ;; スクロールバーの位置更新（メインキャンバスから）
+      (configure canvas :xscrollcommand (format nil "~a set" (widget-path canvas-hscroll)))
+      (configure canvas :yscrollcommand (format nil "~a set" (widget-path canvas-vscroll)))
+      
+      ;; グリッドレイアウト
+      (format-wish "grid ~a -row 0 -column 0 -sticky nw" (widget-path corner-canvas))
+      (format-wish "grid ~a -row 0 -column 1 -sticky new" (widget-path col-header-canvas))
+      (format-wish "grid ~a -row 1 -column 0 -sticky nsw" (widget-path row-header-canvas))
+      (format-wish "grid ~a -row 1 -column 1 -sticky nsew" (widget-path canvas))
+      (format-wish "grid ~a -row 0 -column 2 -rowspan 2 -sticky ns" (widget-path canvas-vscroll))
+      (format-wish "grid ~a -row 2 -column 0 -columnspan 2 -sticky ew" (widget-path canvas-hscroll))
+      (format-wish "grid rowconfigure ~a 1 -weight 1" (widget-path canvas-frame))
+      (format-wish "grid columnconfigure ~a 1 -weight 1" (widget-path canvas-frame))
+      
+      ;; グローバルキャンバス参照を設定 (v0.7.2)
+      (setf *corner-canvas* corner-canvas
+            *col-header-canvas* col-header-canvas
+            *row-header-canvas* row-header-canvas
+            *main-canvas* canvas)
+      
+      ;; スクロール位置を初期化
+      (setf *scroll-x* 0 *scroll-y* 0)
+      
+      ;; マウスホイールスクロール (v0.7.2)
+      ;; Windows/Mac用 - MouseWheelイベント（%Dを安全に渡す）
+      (let ((canvas-path (widget-path canvas)))
+        (ltk::send-wish (format nil "bind ~a <MouseWheel> {ssp_wheel_y %D}" canvas-path))
+        (ltk::send-wish (format nil "bind ~a <Shift-MouseWheel> {ssp_wheel_x %D}" canvas-path)))
+      
+      ;; Linux用 (Button-4/5)
+      (format-wish "bind ~a <Button-4> {scroll_y scroll -3 units}" (widget-path canvas))
+      (format-wish "bind ~a <Button-5> {scroll_y scroll 3 units}" (widget-path canvas))
+      (format-wish "bind ~a <Shift-Button-4> {scroll_x scroll -3 units}" (widget-path canvas))
+      (format-wish "bind ~a <Shift-Button-5> {scroll_x scroll 3 units}" (widget-path canvas))
       
       ;; PanedWindowにペインを追加
       (format-wish ".paned add ~a -weight 0" (widget-path input-frame))
@@ -422,79 +532,83 @@
         ;; Shift+Enter で改行
         (format-wish "bind ~a <Shift-Return> {~a insert insert \\n; break}" path path))
 
-      ;; セルクリック → 選択開始 または リサイズ開始
+      ;; キーボードスクロール (v0.7.2)
+      ;; Page Up/Down
+      (bind canvas "<Prior>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "scroll_y scroll -1 pages")))
+      (bind canvas "<Next>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "scroll_y scroll 1 pages")))
+      ;; Ctrl+Home → 先頭へ
+      (bind canvas "<Control-Home>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "~a yview moveto 0" (widget-path canvas))
+              (format-wish "~a yview moveto 0" (widget-path row-header-canvas))
+              (format-wish "~a xview moveto 0" (widget-path canvas))
+              (format-wish "~a xview moveto 0" (widget-path col-header-canvas))
+              (setf *scroll-x* 0 *scroll-y* 0)))
+      ;; Ctrl+End → 末尾へ
+      (bind canvas "<Control-End>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "~a yview moveto 1" (widget-path canvas))
+              (format-wish "~a yview moveto 1" (widget-path row-header-canvas))
+              (format-wish "~a xview moveto 1" (widget-path canvas))
+              (format-wish "~a xview moveto 1" (widget-path col-header-canvas))))
+
+      ;; セルクリック → 選択開始（クリック時のみスクロール位置を取得 v0.7.2改善）
       (bind canvas "<ButtonPress-1>"
             (lambda (evt)
               (let ((mx (and evt (slot-value evt 'ltk::x)))
                     (my (and evt (slot-value evt 'ltk::y))))
                 (when (and mx my (numberp mx) (numberp my))
-                  ;; ヘッダー領域でのリサイズチェック
-                  (let ((col-border (and (< my +header-h+) 
-                                         (near-col-border-p mx 4)))
-                        (row-border (and (< mx +header-w+) 
-                                         (near-row-border-p my 4))))
-                    (cond
-                      ;; 列幅リサイズ開始
-                      (col-border
-                       (setf (resize-mode) :col
-                             (resize-index) col-border
-                             (resize-start) mx))
-                      ;; 行高さリサイズ開始
-                      (row-border
-                       (setf (resize-mode) :row
-                             (resize-index) row-border
-                             (resize-start) my))
-                      ;; 通常のセル選択
-                      ((and (> mx +header-w+) (> my +header-h+))
-                       (let ((x (clamp (find-col-at mx) 0 (1- (sheet-cols))))
-                             (y (clamp (find-row-at my) 0 (1- (sheet-rows)))))
-                         (setf (cursor-x) x
-                               (cursor-y) y
-                               (selection-start-x) x
-                               (selection-start-y) y
-                               (selection-end-x) x
-                               (selection-end-y) y
-                               (selecting-p) t)
-                         (update-text-input input-text)
-                         (redraw canvas)))))))
+                  ;; クリック時にスクロール位置を取得（1回のみ）
+                  (format-wish "senddatastrings [list [~a canvasx ~d] [~a canvasy ~d]]"
+                               (widget-path canvas) mx (widget-path canvas) my)
+                  (let* ((coords (ltk::read-data))
+                         (canvas-x (if coords (parse-integer (first coords) :junk-allowed t) mx))
+                         (canvas-y (if coords (parse-integer (second coords) :junk-allowed t) my)))
+                    ;; スクロールオフセットを記録（ドラッグ用）
+                    (setf *scroll-x* (- canvas-x mx)
+                          *scroll-y* (- canvas-y my))
+                    ;; ヘッダー分を加算してセル位置を計算
+                    (let* ((adjusted-x (+ canvas-x +header-w+))
+                           (adjusted-y (+ canvas-y +header-h+))
+                           (x (clamp (find-col-at adjusted-x) 0 (1- (sheet-cols))))
+                           (y (clamp (find-row-at adjusted-y) 0 (1- (sheet-rows)))))
+                      (setf (cursor-x) x
+                            (cursor-y) y
+                            (selection-start-x) x
+                            (selection-start-y) y
+                            (selection-end-x) x
+                            (selection-end-y) y
+                            (selecting-p) t)
+                      (update-text-input input-text)
+                      (redraw canvas)))))
               (focus canvas)))
 
-      ;; ドラッグ → 選択範囲拡張 または リサイズ
+      ;; ドラッグ → 選択範囲拡張（キャッシュしたスクロール位置を使用 v0.7.2改善）
       (bind canvas "<B1-Motion>"
             (lambda (evt)
               (let ((mx (and evt (slot-value evt 'ltk::x)))
                     (my (and evt (slot-value evt 'ltk::y))))
-                (when (and mx my (numberp mx) (numberp my))
-                  (cond
-                    ;; 列幅リサイズ中
-                    ((eq (resize-mode) :col)
-                     (let* ((old-w (col-width (resize-index)))
-                            (delta (- mx (resize-start)))
-                            (new-w (max +min-cell-w+ (+ old-w delta))))
-                       (set-col-width (resize-index) new-w)
-                       (setf (resize-start) mx)
-                       ;; キャンバスサイズ更新
-                       (configure canvas :width (total-width))
-                       (redraw canvas)))
-                    ;; 行高さリサイズ中
-                    ((eq (resize-mode) :row)
-                     (let* ((old-h (row-height (resize-index)))
-                            (delta (- my (resize-start)))
-                            (new-h (max +min-cell-h+ (+ old-h delta))))
-                       (set-row-height (resize-index) new-h)
-                       (setf (resize-start) my)
-                       ;; キャンバスサイズ更新
-                       (configure canvas :height (total-height))
-                       (redraw canvas)))
-                    ;; 通常の選択
-                    ((selecting-p)
-                     (let ((x (find-col-at mx))
-                           (y (find-row-at my)))
-                       (when (>= x 0)
-                         (setf (selection-end-x) (clamp x 0 (1- (sheet-cols)))))
-                       (when (>= y 0)
-                         (setf (selection-end-y) (clamp y 0 (1- (sheet-rows))))))
-                     (redraw canvas)))))))
+                (when (and mx my (numberp mx) (numberp my) (selecting-p))
+                  ;; クリック時に取得したスクロールオフセットを使用（通信なし）
+                  (let* ((canvas-x (+ mx *scroll-x*))
+                         (canvas-y (+ my *scroll-y*))
+                         (adjusted-x (+ canvas-x +header-w+))
+                         (adjusted-y (+ canvas-y +header-h+))
+                         (x (find-col-at adjusted-x))
+                         (y (find-row-at adjusted-y)))
+                    (when (>= x 0)
+                      (setf (selection-end-x) (clamp x 0 (1- (sheet-cols)))))
+                    (when (>= y 0)
+                      (setf (selection-end-y) (clamp y 0 (1- (sheet-rows)))))
+                    (redraw canvas))))))
 
       ;; ドラッグ終了
       (bind canvas "<ButtonRelease-1>"
@@ -503,6 +617,147 @@
               (setf (selecting-p) nil
                     (resize-mode) nil
                     (resize-index) nil)))
+
+      ;; === 列幅リサイズ機能 (col-header-canvas) ===
+      ;; 列境界検出ヘルパー（境界から±5px以内か）
+      (flet ((find-col-border (x)
+               "x座標が列境界の近くなら列インデックスを返す、そうでなければnil"
+               (let ((accum 0))
+                 (dotimes (col (sheet-cols))
+                   (incf accum (col-width col))
+                   (when (<= (abs (- x accum)) 5)
+                     (return-from find-col-border col)))
+                 nil)))
+        
+        ;; 列ヘッダークリック → リサイズ開始
+        (bind col-header-canvas "<ButtonPress-1>"
+              (lambda (evt)
+                (let ((mx (and evt (slot-value evt 'ltk::x))))
+                  (when (and mx (numberp mx))
+                    ;; スクロール位置を考慮
+                    (format-wish "senddatastrings [list [~a canvasx ~d]]"
+                                 (widget-path col-header-canvas) mx)
+                    (let* ((coords (ltk::read-data))
+                           (canvas-x (if coords (parse-integer (first coords) :junk-allowed t) mx))
+                           (border-col (find-col-border canvas-x)))
+                      (if border-col
+                          ;; リサイズモード開始
+                          (setf (resize-mode) :col
+                                (resize-index) border-col
+                                (resize-start) canvas-x)
+                          ;; 列選択（将来の機能用）
+                          nil))))))
+        
+        ;; 列ヘッダードラッグ → 列幅変更
+        (bind col-header-canvas "<B1-Motion>"
+              (lambda (evt)
+                (let ((mx (and evt (slot-value evt 'ltk::x))))
+                  (when (and mx (numberp mx) (eq (resize-mode) :col) (resize-index))
+                    ;; スクロール位置を考慮
+                    (format-wish "senddatastrings [list [~a canvasx ~d]]"
+                                 (widget-path col-header-canvas) mx)
+                    (let* ((coords (ltk::read-data))
+                           (canvas-x (if coords (parse-integer (first coords) :junk-allowed t) mx))
+                           (col (resize-index))
+                           (col-start (col-left col))
+                           (new-width (max +min-col-width+ (- canvas-x (- col-start +header-w+)))))
+                      (set-col-width col new-width)
+                      (update-scroll-region canvas)
+                      (redraw canvas))))))
+        
+        ;; 列ヘッダードラッグ終了
+        (bind col-header-canvas "<ButtonRelease-1>"
+              (lambda (evt)
+                (declare (ignore evt))
+                (setf (resize-mode) nil
+                      (resize-index) nil
+                      (resize-start) nil)))
+        
+        ;; カーソル変更（リサイズ可能位置でsb_h_double_arrow）
+        (bind col-header-canvas "<Motion>"
+              (lambda (evt)
+                (let ((mx (and evt (slot-value evt 'ltk::x))))
+                  (when (and mx (numberp mx))
+                    (format-wish "senddatastrings [list [~a canvasx ~d]]"
+                                 (widget-path col-header-canvas) mx)
+                    (let* ((coords (ltk::read-data))
+                           (canvas-x (if coords (parse-integer (first coords) :junk-allowed t) mx))
+                           (border-col (find-col-border canvas-x)))
+                      (if border-col
+                          (format-wish "~a configure -cursor sb_h_double_arrow"
+                                       (widget-path col-header-canvas))
+                          (format-wish "~a configure -cursor {}"
+                                       (widget-path col-header-canvas)))))))))
+
+      ;; === 行高さリサイズ機能 (row-header-canvas) ===
+      (flet ((find-row-border (y)
+               "y座標が行境界の近くなら行インデックスを返す、そうでなければnil"
+               (let ((accum 0))
+                 (dotimes (row (sheet-rows))
+                   (incf accum (row-height row))
+                   (when (<= (abs (- y accum)) 5)
+                     (return-from find-row-border row)))
+                 nil)))
+        
+        ;; 行ヘッダークリック → リサイズ開始
+        (bind row-header-canvas "<ButtonPress-1>"
+              (lambda (evt)
+                (let ((my (and evt (slot-value evt 'ltk::y))))
+                  (when (and my (numberp my))
+                    ;; スクロール位置を考慮
+                    (format-wish "senddatastrings [list [~a canvasy ~d]]"
+                                 (widget-path row-header-canvas) my)
+                    (let* ((coords (ltk::read-data))
+                           (canvas-y (if coords (parse-integer (first coords) :junk-allowed t) my))
+                           (border-row (find-row-border canvas-y)))
+                      (if border-row
+                          ;; リサイズモード開始
+                          (setf (resize-mode) :row
+                                (resize-index) border-row
+                                (resize-start) canvas-y)
+                          ;; 行選択（将来の機能用）
+                          nil))))))
+        
+        ;; 行ヘッダードラッグ → 行高さ変更
+        (bind row-header-canvas "<B1-Motion>"
+              (lambda (evt)
+                (let ((my (and evt (slot-value evt 'ltk::y))))
+                  (when (and my (numberp my) (eq (resize-mode) :row) (resize-index))
+                    ;; スクロール位置を考慮
+                    (format-wish "senddatastrings [list [~a canvasy ~d]]"
+                                 (widget-path row-header-canvas) my)
+                    (let* ((coords (ltk::read-data))
+                           (canvas-y (if coords (parse-integer (first coords) :junk-allowed t) my))
+                           (row (resize-index))
+                           (row-start (row-top row))
+                           (new-height (max +min-row-height+ (- canvas-y (- row-start +header-h+)))))
+                      (set-row-height row new-height)
+                      (update-scroll-region canvas)
+                      (redraw canvas))))))
+        
+        ;; 行ヘッダードラッグ終了
+        (bind row-header-canvas "<ButtonRelease-1>"
+              (lambda (evt)
+                (declare (ignore evt))
+                (setf (resize-mode) nil
+                      (resize-index) nil
+                      (resize-start) nil)))
+        
+        ;; カーソル変更（リサイズ可能位置でsb_v_double_arrow）
+        (bind row-header-canvas "<Motion>"
+              (lambda (evt)
+                (let ((my (and evt (slot-value evt 'ltk::y))))
+                  (when (and my (numberp my))
+                    (format-wish "senddatastrings [list [~a canvasy ~d]]"
+                                 (widget-path row-header-canvas) my)
+                    (let* ((coords (ltk::read-data))
+                           (canvas-y (if coords (parse-integer (first coords) :junk-allowed t) my))
+                           (border-row (find-row-border canvas-y)))
+                      (if border-row
+                          (format-wish "~a configure -cursor sb_v_double_arrow"
+                                       (widget-path row-header-canvas))
+                          (format-wish "~a configure -cursor {}"
+                                       (widget-path row-header-canvas)))))))))
 
       ;; 右クリック用の変数
       (let ((context-col nil)   ; 右クリックされた列

@@ -1,7 +1,8 @@
 ;;;; core.lisp
-;;;; SSP v0.7.1 - セル操作、依存関係、Undo/Redo、ファイルI/O
+;;;; SSP v0.7.2 - セル操作、依存関係、Undo/Redo、ファイルI/O
 ;;;; v0.7: UTF-8ファイルI/O、Excel互換CSV（BOM付き）
 ;;;; v0.7.1: 循環参照検出改善、評価キャッシュ、パフォーマンス最適化
+;;;; v0.7.2: シートサイズ上限設定、インポート時のサイズ検証
 
 (in-package :ssexp)
 
@@ -58,6 +59,20 @@
   "全行の合計高さ"
   (let ((h +header-h+))
     (dotimes (y (sheet-rows) h)
+      (incf h (row-height y)))))
+
+(defun visible-width ()
+  "表示領域の幅（+visible-cols+列分）"
+  (let ((w +header-w+)
+        (cols (min +visible-cols+ (sheet-cols))))
+    (dotimes (x cols w)
+      (incf w (col-width x)))))
+
+(defun visible-height ()
+  "表示領域の高さ（+visible-rows+行分）"
+  (let ((h +header-h+)
+        (rows (min +visible-rows+ (sheet-rows))))
+    (dotimes (y rows h)
       (incf h (row-height y)))))
 
 (defun find-col-at (px)
@@ -729,44 +744,59 @@
         (set-clipboard (nreverse cells) rows cols)))))
 
 (defun paste-clipboard ()
-  "クリップボードの内容をカーソル位置にペースト"
+  "クリップボードの内容をカーソル位置にペースト
+   選択範囲がある場合は、範囲内に繰り返し貼り付け"
   (when (clipboard-cells)
-    (let ((idx 0)
-          (clip (clipboard-cells))
-          (pasted-cells nil)
-          (before-snapshots nil)
-          (after-snapshots nil))
-      ;; まず全てのセルに値と数式を設定
-      (loop for dy from 0 below (clipboard-rows) do
-        (loop for dx from 0 below (clipboard-cols) do
-          (let* ((x (+ (cursor-x) dx))
-                 (y (+ (cursor-y) dy)))
-            (when (and (< x (sheet-cols)) (< y (sheet-rows)))
-              (let* ((name (cell-name x y))
-                     (cell (get-cell name))
-                     (data (nth idx clip))
-                     (formula (second data)))
-                ;; 変更前の状態を保存
-                (push (make-cell-snapshot name) before-snapshots)
-                ;; 数式がある場合は再評価
-                (if formula
-                    (progn
-                      (setf (eval-col) x (eval-row) y)
-                      (let ((*eval-stack* (list name)))
-                        (handler-case
-                            (setf (cell-value cell) (eval-formula formula))
-                          (error (e)
-                            (setf (cell-value cell) (format nil "ERR: ~a" e)))))
-                      (setf (cell-formula cell) formula)
-                      (update-dependencies name (extract-references formula y x)))
-                    (progn
-                      (setf (cell-value cell) (first data)
-                            (cell-formula cell) nil)
-                      (update-dependencies name nil)))
-                ;; 変更後の状態を保存
-                (push (make-cell-snapshot name) after-snapshots)
-                (push name pasted-cells))))
-          (incf idx)))
+    (let* ((clip (clipboard-cells))
+           (clip-rows (clipboard-rows))
+           (clip-cols (clipboard-cols))
+           (pasted-cells nil)
+           (before-snapshots nil)
+           (after-snapshots nil)
+           ;; 実際に範囲選択があるか（1セル以上の範囲）
+           (has-range (and (has-selection-p)
+                          (or (/= (selection-start-x) (selection-end-x))
+                              (/= (selection-start-y) (selection-end-y))))))
+      ;; 貼り付け範囲を決定
+      (multiple-value-bind (paste-min-x paste-min-y paste-max-x paste-max-y)
+          (if has-range
+              ;; 選択範囲がある場合はその範囲に貼り付け
+              (selection-bounds)
+              ;; 選択範囲がない場合はカーソル位置からクリップボードサイズ分
+              (values (cursor-x) (cursor-y)
+                      (min (1- (sheet-cols)) (+ (cursor-x) clip-cols -1))
+                      (min (1- (sheet-rows)) (+ (cursor-y) clip-rows -1))))
+        ;; 範囲内のセルに貼り付け（タイル状に繰り返し）
+        (loop for y from paste-min-y to paste-max-y do
+          (loop for x from paste-min-x to paste-max-x do
+            (let* ((name (cell-name x y))
+                   (cell (get-cell name))
+                   ;; クリップボード内の位置を計算（繰り返し）
+                   (clip-dx (mod (- x paste-min-x) clip-cols))
+                   (clip-dy (mod (- y paste-min-y) clip-rows))
+                   (clip-idx (+ (* clip-dy clip-cols) clip-dx))
+                   (data (nth clip-idx clip))
+                   (formula (second data)))
+              ;; 変更前の状態を保存
+              (push (make-cell-snapshot name) before-snapshots)
+              ;; 数式がある場合は再評価
+              (if formula
+                  (progn
+                    (setf (eval-col) x (eval-row) y)
+                    (let ((*eval-stack* (list name)))
+                      (handler-case
+                          (setf (cell-value cell) (eval-formula formula))
+                        (error (e)
+                          (setf (cell-value cell) (format nil "ERR: ~a" e)))))
+                    (setf (cell-formula cell) formula)
+                    (update-dependencies name (extract-references formula y x)))
+                  (progn
+                    (setf (cell-value cell) (first data)
+                          (cell-formula cell) nil)
+                    (update-dependencies name nil)))
+              ;; 変更後の状態を保存
+              (push (make-cell-snapshot name) after-snapshots)
+              (push name pasted-cells)))))
       ;; Undo履歴に記録
       (when pasted-cells
         (record-multi-change (nreverse before-snapshots) (nreverse after-snapshots)))
@@ -891,7 +921,8 @@
                trimmed))))))
 
 (defun paste-from-system-clipboard ()
-  "システムクリップボードから貼り付け"
+  "システムクリップボードから貼り付け
+   選択範囲がある場合は、範囲内に繰り返し貼り付け"
   (let ((text (get-system-clipboard))
         (pasted-cells nil)
         (before-snapshots nil)
@@ -904,56 +935,61 @@
                          for i from 0
                          while (or (< i (1- (length lines)))
                                   (> (length l) 0))
-                         collect l)))
-        (if (and (= (length lines) 1)
-                 (not (find #\Tab (first lines))))
-            ;; 単一値の場合
-            (let* ((name (cell-name (cursor-x) (cursor-y)))
-                   (cell (get-cell name)))
-              ;; 変更前の状態を保存
-              (push (make-cell-snapshot name) before-snapshots)
-              ;; 評価位置を設定
-              (setf (eval-col) (cursor-x) (eval-row) (cursor-y))
-              (multiple-value-bind (val form) 
-                  (parse-clipboard-value (first lines))
-                (setf (cell-value cell) val
-                      (cell-formula cell) form)
-                (if form
-                    (update-dependencies name (extract-references form (cursor-y) (cursor-x)))
-                    (update-dependencies name nil))
-                ;; 変更後の状態を保存
-                (push (make-cell-snapshot name) after-snapshots)
-                (push name pasted-cells)))
-            ;; 複数セル（TSV形式）の場合
-            (loop for line in lines
-                  for dy from 0 do
-              (loop for col-text in (split-string line #\Tab)
-                    for dx from 0 do
-                (let ((x (+ (cursor-x) dx))
-                      (y (+ (cursor-y) dy)))
-                  (when (and (< x (sheet-cols)) (< y (sheet-rows)))
-                    (let* ((name (cell-name x y))
-                           (cell (get-cell name)))
-                      ;; 変更前の状態を保存
-                      (push (make-cell-snapshot name) before-snapshots)
-                      ;; 評価位置を設定
-                      (setf (eval-col) x (eval-row) y)
-                      (multiple-value-bind (val form)
-                          (parse-clipboard-value col-text)
-                        (setf (cell-value cell) val
-                              (cell-formula cell) form)
-                        (if form
-                            (update-dependencies name (extract-references form y x))
-                            (update-dependencies name nil))
-                        ;; 変更後の状態を保存
-                        (push (make-cell-snapshot name) after-snapshots)
-                        (push name pasted-cells))))))))))
-    ;; Undo履歴に記録
-    (when pasted-cells
-      (record-multi-change (nreverse before-snapshots) (nreverse after-snapshots)))
-    ;; 貼り付けたセルの依存元を再計算
-    (dolist (name (nreverse pasted-cells))
-      (recalc-dependents name))))
+                         collect l))
+             ;; クリップボードデータを2次元配列に変換
+             (clip-data (if (and (= (length lines) 1)
+                                 (not (find #\Tab (first lines))))
+                           ;; 単一値
+                           (list (list (first lines)))
+                           ;; 複数セル（TSV形式）
+                           (mapcar (lambda (line) (split-string line #\Tab)) lines)))
+             (clip-rows (length clip-data))
+             (clip-cols (if clip-data (length (first clip-data)) 1))
+             ;; 実際に範囲選択があるか（1セル以上の範囲）
+             (has-range (and (has-selection-p)
+                            (or (/= (selection-start-x) (selection-end-x))
+                                (/= (selection-start-y) (selection-end-y))))))
+        ;; 貼り付け範囲を決定
+        (multiple-value-bind (paste-min-x paste-min-y paste-max-x paste-max-y)
+            (if has-range
+                ;; 選択範囲がある場合はその範囲に貼り付け
+                (selection-bounds)
+                ;; 選択範囲がない場合はカーソル位置からクリップボードサイズ分
+                (values (cursor-x) (cursor-y)
+                        (min (1- (sheet-cols)) (+ (cursor-x) clip-cols -1))
+                        (min (1- (sheet-rows)) (+ (cursor-y) clip-rows -1))))
+          ;; 範囲内のセルに貼り付け（タイル状に繰り返し）
+          (loop for y from paste-min-y to paste-max-y do
+            (loop for x from paste-min-x to paste-max-x do
+              (let* ((name (cell-name x y))
+                     (cell (get-cell name))
+                     ;; クリップボード内の位置を計算（繰り返し）
+                     (clip-dy (mod (- y paste-min-y) clip-rows))
+                     (clip-dx (mod (- x paste-min-x) clip-cols))
+                     (row-data (nth clip-dy clip-data))
+                     (col-text (if (< clip-dx (length row-data))
+                                   (nth clip-dx row-data)
+                                   "")))
+                ;; 変更前の状態を保存
+                (push (make-cell-snapshot name) before-snapshots)
+                ;; 評価位置を設定
+                (setf (eval-col) x (eval-row) y)
+                (multiple-value-bind (val form)
+                    (parse-clipboard-value col-text)
+                  (setf (cell-value cell) val
+                        (cell-formula cell) form)
+                  (if form
+                      (update-dependencies name (extract-references form y x))
+                      (update-dependencies name nil))
+                  ;; 変更後の状態を保存
+                  (push (make-cell-snapshot name) after-snapshots)
+                  (push name pasted-cells)))))))
+      ;; Undo履歴に記録
+      (when pasted-cells
+        (record-multi-change (nreverse before-snapshots) (nreverse after-snapshots)))
+      ;; 貼り付けたセルの依存元を再計算
+      (dolist (name (nreverse pasted-cells))
+        (recalc-dependents name)))))
 
 ;;;; =========================
 ;;;; 依存関係管理と再計算
@@ -1409,7 +1445,7 @@
            :format-version 1
            :metadata (:created ,(iso-timestamp)
                       :modified ,(iso-timestamp)
-                      :app-version "0.7")
+                      :app-version "0.7.2")
            :grid (:rows ,(sheet-rows) :cols ,(sheet-cols))
            :cells ,cells-data)
          out)
@@ -1419,7 +1455,8 @@
     filename))
 
 (defun load-file (filename)
-  "ファイルからスプレッドシートを読み込み"
+  "ファイルからスプレッドシートを読み込み
+   v0.7.2: サイズ検証を追加"
   (with-open-file (in filename 
                       :direction :input
                       :external-format :utf-8)
@@ -1434,35 +1471,53 @@
         ;; バージョンチェック
         (when (and version (> version 1))
           (warn "ファイルバージョン ~a は完全にはサポートされていません" version))
-        ;; グリッド設定
+        ;; グリッド設定 (v0.7.2: サイズ検証)
         (when grid
-          (setf (sheet-rows) (or (getf grid :rows) (sheet-rows))
-                (sheet-cols) (or (getf grid :cols) (sheet-cols))))
+          (let ((file-rows (or (getf grid :rows) +default-rows+))
+                (file-cols (or (getf grid :cols) +default-cols+)))
+            (multiple-value-bind (valid-rows valid-cols warnings)
+                (validate-grid-size file-rows file-cols)
+              ;; 警告表示
+              (dolist (w warnings)
+                (format t "Warning: ~a~%" w))
+              (setf (sheet-rows) valid-rows
+                    (sheet-cols) valid-cols))))
         ;; シートをクリア
         (reset-sheet)
         (clear-dependencies)
+        (clear-cache)
         ;; Undo/Redo履歴をクリア
         (setf (undo-stack) nil
               (redo-stack) nil)
-        ;; セルデータを復元
-        (dolist (cell-data cells)
-          (let* ((name (first cell-data))
-                 (value (second cell-data))
-                 (formula (third cell-data))
-                 (cell (get-cell name)))
-            (setf (cell-value cell) value
-                  (cell-formula cell) formula)
-            ;; 依存関係を再構築
-            (when formula
-              (let ((coords (parse-cell-name name)))
-                (update-dependencies 
-                 name 
-                 (extract-references formula 
-                                    (second coords) 
-                                    (first coords)))))))
-        (setf (current-file) filename)
-        (format t "~%Loaded: ~a (~d cells)~%" filename (length cells))
-        filename))))
+        ;; セルデータを復元（範囲内のみ）
+        (let ((loaded-count 0)
+              (skipped-count 0))
+          (dolist (cell-data cells)
+            (let* ((name (first cell-data))
+                   (value (second cell-data))
+                   (formula (third cell-data))
+                   (coords (parse-cell-name name))
+                   (col (first coords))
+                   (row (second coords)))
+              ;; 範囲チェック (v0.7.2)
+              (if (and (< col (sheet-cols)) (< row (sheet-rows)))
+                  (let ((cell (get-cell name)))
+                    (setf (cell-value cell) value
+                          (cell-formula cell) formula)
+                    ;; 依存関係を再構築
+                    (when formula
+                      (update-dependencies 
+                       name 
+                       (extract-references formula row col)))
+                    (incf loaded-count))
+                  (incf skipped-count))))
+          (when (> skipped-count 0)
+            (format t "Warning: ~d cells outside grid limits were skipped~%" skipped-count))
+          (setf (current-file) filename)
+          (format t "~%Loaded: ~a~%" filename)
+          (format t "  Grid size: ~d rows × ~d cols~%" (sheet-rows) (sheet-cols))
+          (format t "  Cells loaded: ~d~%" loaded-count)
+          filename)))))
 
 (defun new-sheet ()
   "新規シートを作成（現在のデータをクリア）"
@@ -1620,46 +1675,89 @@
                num
                trimmed))))))
 
-(defun import-csv (filename &key (has-header nil) (start-col 0) (start-row 0))
+(defun import-csv (filename &key (has-header nil) (start-col 0) (start-row 0) 
+                            (expand-grid t) (max-rows +max-rows+) (max-cols +max-cols+))
   "CSVファイルからインポート
-   :has-header 最初の行をヘッダーとしてスキップ（デフォルトnil）
-   :start-col  開始列（デフォルト0=A列）
-   :start-row  開始行（デフォルト0=1行目）"
-  (with-open-file (in filename 
-                      :direction :input
-                      :external-format :utf-8)
-    (let ((row-idx start-row)
-          (cell-count 0)
-          (first-line t))
-      ;; シートをクリア
-      (reset-sheet)
-      (clear-dependencies)
-      ;; 各行を処理
+   :has-header  最初の行をヘッダーとしてスキップ（デフォルトnil）
+   :start-col   開始列（デフォルト0=A列）
+   :start-row   開始行（デフォルト0=1行目）
+   :expand-grid データに合わせてグリッドを拡張（デフォルトt）
+   :max-rows    最大行数（デフォルト1000）
+   :max-cols    最大列数（デフォルト26）"
+  ;; まずファイルをスキャンしてサイズを確認
+  (let ((csv-rows 0)
+        (csv-cols 0)
+        (warnings nil))
+    (with-open-file (in filename :direction :input :external-format :utf-8)
       (loop for line = (read-line in nil nil)
             while line do
-        ;; ヘッダー行をスキップ
-        (if (and first-line has-header)
-            (setf first-line nil)
-            (progn
+        (incf csv-rows)
+        (let ((fields (parse-csv-line line)))
+          (setf csv-cols (max csv-cols (length fields))))))
+    ;; ヘッダー行を除外
+    (when has-header (decf csv-rows))
+    ;; サイズ検証
+    (let ((target-rows (+ start-row csv-rows))
+          (target-cols (+ start-col csv-cols)))
+      ;; 制限チェック
+      (when (> target-rows max-rows)
+        (push (format nil "行数制限: ~d行中~d行のみインポート" 
+                      csv-rows (- max-rows start-row)) warnings)
+        (setf target-rows max-rows))
+      (when (> target-cols max-cols)
+        (push (format nil "列数制限: ~d列中~d列のみインポート（A-Z形式）" 
+                      csv-cols (- max-cols start-col)) warnings)
+        (setf target-cols max-cols))
+      ;; グリッド拡張
+      (when expand-grid
+        (when (> target-rows (sheet-rows))
+          (setf (sheet-rows) target-rows)
+          (init-sizes))
+        (when (> target-cols (sheet-cols))
+          (setf (sheet-cols) target-cols)
+          (init-sizes)))
+      ;; 警告表示
+      (dolist (w warnings)
+        (format t "Warning: ~a~%" w)))
+    ;; 実際のインポート
+    (with-open-file (in filename :direction :input :external-format :utf-8)
+      (let ((row-idx start-row)
+            (cell-count 0)
+            (first-line t)
+            (effective-max-rows (min max-rows (sheet-rows)))
+            (effective-max-cols (min max-cols (sheet-cols))))
+        ;; シートをクリア
+        (reset-sheet)
+        (clear-dependencies)
+        (clear-cache)
+        ;; 各行を処理
+        (loop for line = (read-line in nil nil)
+              while (and line (< row-idx effective-max-rows)) do
+          ;; ヘッダー行をスキップ
+          (if (and first-line has-header)
               (setf first-line nil)
-              (let ((fields (parse-csv-line line))
-                    (col-idx start-col))
-                (dolist (field fields)
-                  (when (< col-idx (sheet-cols))
-                    (multiple-value-bind (val formula) (parse-csv-value field)
-                      (when val
-                        (let* ((name (cell-name col-idx row-idx))
-                               (cell (get-cell name)))
-                          (setf (cell-value cell) val
-                                (cell-formula cell) formula)
-                          (when formula
-                            (update-dependencies 
-                             name 
-                             (extract-references formula row-idx col-idx)))
-                          (incf cell-count)))))
-                  (incf col-idx)))
-              (incf row-idx))))
-      (setf (current-file) nil)  ; CSVなのでsspではない
-      (format t "~%Imported CSV: ~a (~d cells)~%" filename cell-count)
-      filename)))
+              (progn
+                (setf first-line nil)
+                (let ((fields (parse-csv-line line))
+                      (col-idx start-col))
+                  (dolist (field fields)
+                    (when (< col-idx effective-max-cols)
+                      (multiple-value-bind (val formula) (parse-csv-value field)
+                        (when val
+                          (let* ((name (cell-name col-idx row-idx))
+                                 (cell (get-cell name)))
+                            (setf (cell-value cell) val
+                                  (cell-formula cell) formula)
+                            (when formula
+                              (update-dependencies 
+                               name 
+                               (extract-references formula row-idx col-idx)))
+                            (incf cell-count)))))
+                    (incf col-idx)))
+                (incf row-idx))))
+        (setf (current-file) nil)  ; CSVなのでsspではない
+        (format t "~%Imported CSV: ~a~%" filename)
+        (format t "  Grid size: ~d rows × ~d cols~%" (sheet-rows) (sheet-cols))
+        (format t "  Cells imported: ~d~%" cell-count)
+        filename))))
 
