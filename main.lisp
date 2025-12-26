@@ -1021,33 +1021,27 @@
               (redraw canvas)
               (update-text-input input-text)))
 
-      ;; 矢印キー（デバウンス付き v0.7.7）
-      ;; キーリピートによるイベント蓄積を防止
-      (let ((last-key-time 0)
-            (key-interval 30))  ; 最小間隔（ミリ秒）
-        (flet ((debounced-move (move-fn)
-                 (let ((now (get-internal-real-time)))
-                   (when (> (- now last-key-time) 
-                           (* key-interval (/ internal-time-units-per-second 1000)))
-                     (setf last-key-time now)
-                     (clear-selection)
-                     (funcall move-fn canvas input-text)))))
-          (bind canvas "<Left>"
-                (lambda (evt) 
-                  (declare (ignore evt)) 
-                  (debounced-move #'move-left)))
-          (bind canvas "<Right>"
-                (lambda (evt) 
-                  (declare (ignore evt)) 
-                  (debounced-move #'move-right)))
-          (bind canvas "<Up>"
-                (lambda (evt) 
-                  (declare (ignore evt)) 
-                  (debounced-move #'move-up)))
-          (bind canvas "<Down>"
-                (lambda (evt) 
-                  (declare (ignore evt)) 
-                  (debounced-move #'move-down)))))
+      ;; 矢印キー（シンプル版 v0.8.0）
+      (bind canvas "<Left>"
+            (lambda (evt) 
+              (declare (ignore evt)) 
+              (clear-selection)
+              (move-left canvas input-text)))
+      (bind canvas "<Right>"
+            (lambda (evt) 
+              (declare (ignore evt)) 
+              (clear-selection)
+              (move-right canvas input-text)))
+      (bind canvas "<Up>"
+            (lambda (evt) 
+              (declare (ignore evt)) 
+              (clear-selection)
+              (move-up canvas input-text)))
+      (bind canvas "<Down>"
+            (lambda (evt) 
+              (declare (ignore evt)) 
+              (clear-selection)
+              (move-down canvas input-text)))
 
       ;; Shift+矢印キー（範囲選択）
       (bind canvas "<Shift-Left>"

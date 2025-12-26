@@ -72,7 +72,7 @@
 ;;;; バージョン情報 (v0.7.2)
 ;;;; =========================
 
-(defparameter *ssp-version* "0.7.7")
+(defparameter *ssp-version* "0.8.0")
 
 (defun version-info ()
   "バージョン情報を返す"
@@ -98,16 +98,16 @@
 (defconstant +min-row-height+ 15
   "最小行高さ（ピクセル）")
 
-(defconstant +default-rows+ 40
+(defconstant +default-rows+ 200
   "デフォルト行数")
 
-(defconstant +default-cols+ 12
+(defconstant +default-cols+ 16
   "デフォルト列数")
 
 (defconstant +visible-rows+ 30
   "表示行数（ウィンドウサイズ制限）")
 
-(defconstant +visible-cols+ 14
+(defconstant +visible-cols+ 16
   "表示列数（ウィンドウサイズ制限）")
 
 (defun validate-grid-size (rows cols)

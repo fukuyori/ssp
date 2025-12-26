@@ -1,11 +1,12 @@
 ;;;; ui.lisp
-;;;; SSP v0.7.7 - 描画、入力処理、シンタックスハイライト
+;;;; SSP v0.8.0 - 描画、入力処理、シンタックスハイライト
 ;;;; v0.7: 日本語・Unicode対応（フォント設定、文字幅計算）
 ;;;; v0.7.3: バッチ描画によるパフォーマンス改善
 ;;;; v0.7.4: 大規模シート対応（最大10000行）
 ;;;; v0.7.5: スクロール位置追跡の改善
 ;;;; v0.7.6: 表示範囲計算の実装
 ;;;; v0.7.7: 仮想スクロール描画（表示範囲のみ描画）
+;;;; v0.8.0: 差分更新（変更セルのみ再描画）
 
 (in-package :ssexp)
 
@@ -328,8 +329,8 @@
                      (widget-path canvas) (total-width) (total-height)))))
 
 (defun scroll-to-cursor (canvas)
-  "カーソルが表示枠外にある場合のみスクロール（v0.7.5改良）
-   表示枠内なら何もしない"
+  "カーソルが表示枠外にある場合のみスクロール（v0.8.0改良）
+   スクロールが発生した場合は全体再描画を行う"
   ;; まずTkの実際のスクロール位置と同期
   (sync-scroll-position)
   (let* ((main-canvas (or *main-canvas* canvas))
@@ -348,7 +349,9 @@
          (scroll-left *scroll-x*)
          (scroll-top *scroll-y*)
          (scroll-right (+ scroll-left visible-w))
-         (scroll-bottom (+ scroll-top visible-h)))
+         (scroll-bottom (+ scroll-top visible-h))
+         ;; スクロールが発生したかどうか
+         (scrolled nil))
     ;; 水平方向チェック
     (when (> cells-w visible-w)
       (cond
@@ -358,7 +361,8 @@
            (format-wish "~a xview moveto ~f" (widget-path main-canvas) xpos)
            (when *col-header-canvas*
              (format-wish "~a xview moveto ~f" (widget-path *col-header-canvas*) xpos))
-           (setf *scroll-x* cursor-left)))
+           (setf *scroll-x* cursor-left)
+           (setf scrolled t)))
         ;; カーソルが右にはみ出し
         ((> cursor-right scroll-right)
          (let* ((new-left (- cursor-right visible-w))
@@ -366,7 +370,8 @@
            (format-wish "~a xview moveto ~f" (widget-path main-canvas) xpos)
            (when *col-header-canvas*
              (format-wish "~a xview moveto ~f" (widget-path *col-header-canvas*) xpos))
-           (setf *scroll-x* new-left)))))
+           (setf *scroll-x* new-left)
+           (setf scrolled t)))))
     ;; 垂直方向チェック
     (when (> cells-h visible-h)
       (cond
@@ -376,7 +381,8 @@
            (format-wish "~a yview moveto ~f" (widget-path main-canvas) ypos)
            (when *row-header-canvas*
              (format-wish "~a yview moveto ~f" (widget-path *row-header-canvas*) ypos))
-           (setf *scroll-y* cursor-top)))
+           (setf *scroll-y* cursor-top)
+           (setf scrolled t)))
         ;; カーソルが下にはみ出し
         ((> cursor-bottom scroll-bottom)
          (let* ((new-top (- cursor-bottom visible-h))
@@ -384,7 +390,11 @@
            (format-wish "~a yview moveto ~f" (widget-path main-canvas) ypos)
            (when *row-header-canvas*
              (format-wish "~a yview moveto ~f" (widget-path *row-header-canvas*) ypos))
-           (setf *scroll-y* new-top)))))))
+           (setf *scroll-y* new-top)
+           (setf scrolled t)))))
+    ;; スクロールが発生した場合は全体再描画
+    (when scrolled
+      (redraw canvas))))
 
 ;;; ============================
 ;;; 複数キャンバス対応描画関数 (v0.7.2)
@@ -440,6 +450,19 @@
     (format nil "~a create rectangle ~a ~a ~a ~a -fill {~a} -outline gray"
             path px py px2 py2 bg)))
 
+(defun make-cell-bg-command-tagged (path x y val selected in-selection offset-x offset-y)
+  "セル背景描画コマンドを生成（タグ付き v0.8.0）"
+  (let* ((px (- (col-left x) offset-x))
+         (py (- (row-top y) offset-y))
+         (w (col-width x))
+         (h (row-height y))
+         (px2 (+ px w))
+         (py2 (+ py h))
+         (bg (cell-bg-color val selected in-selection))
+         (tag (format nil "cell_~d_~d" x y)))
+    (format nil "~a create rectangle ~a ~a ~a ~a -fill {~a} -outline gray -tags ~a"
+            path px py px2 py2 bg tag)))
+
 (defun make-cell-text-command (path x y val offset-x offset-y)
   "セルテキスト描画コマンドを生成（バッチ用 v0.7.3）"
   (when val
@@ -464,6 +487,54 @@
           (format nil "~a create text ~a ~a -anchor w -text {~a} -font {~a}"
                   path (+ px 6) (+ py (floor h 2)) safe-text font-spec)))))
 
+(defun make-cell-text-command-tagged (path x y val offset-x offset-y)
+  "セルテキスト描画コマンドを生成（タグ付き v0.8.0）"
+  (when val
+    (let* ((px (- (col-left x) offset-x))
+           (py (- (row-top y) offset-y))
+           (w (col-width x))
+           (h (row-height y))
+           (raw-text (format-value val))
+           (available-width (- w 12))
+           (char-pixel-width 7)
+           (available-chars (floor available-width char-pixel-width))
+           (display-text (if (> (string-display-width raw-text) available-chars)
+                            (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
+                            raw-text))
+           (is-number (numberp val))
+           (font-spec (format nil "{~a} ~a" *font-family* *font-size*))
+           (safe-text (escape-tcl-string display-text))
+           (tag (format nil "cell_~d_~d" x y)))
+      (if is-number
+          (format nil "~a create text ~a ~a -anchor e -text {~a} -font {~a} -tags ~a"
+                  path (+ px w -6) (+ py (floor h 2)) safe-text font-spec tag)
+          (format nil "~a create text ~a ~a -anchor w -text {~a} -font {~a} -tags ~a"
+                  path (+ px 6) (+ py (floor h 2)) safe-text font-spec tag)))))
+
+;;;; =========================
+;;;; 単一セル更新 (v0.8.0 差分更新)
+;;;; =========================
+
+(defun redraw-single-cell (canvas x y)
+  "単一セルを再描画（差分更新 v0.8.0）"
+  (when (and *main-canvas* (>= x 0) (>= y 0)
+             (< x (sheet-cols)) (< y (sheet-rows)))
+    (let* ((path (widget-path (or canvas *main-canvas*)))
+           (cell (get-cell (cell-name x y)))
+           (val (cell-value cell))
+           (selected (and (= x (cursor-x)) (= y (cursor-y))))
+           (in-selection (cell-in-selection-p x y))
+           (tag (format nil "cell_~d_~d" x y)))
+      ;; 古い描画を削除
+      (format-wish "~a delete ~a" path tag)
+      ;; 背景を描画
+      (format-wish "~a" (make-cell-bg-command-tagged path x y val selected in-selection
+                                                     +header-w+ +header-h+))
+      ;; テキストを描画
+      (let ((text-cmd (make-cell-text-command-tagged path x y val +header-w+ +header-h+)))
+        (when text-cmd
+          (format-wish "~a" text-cmd))))))
+
 (defun escape-tcl-string (str)
   "Tcl文字列内の特殊文字をエスケープ（v0.7.3）"
   (if (or (find #\{ str) (find #\} str) (find #\\ str) (find #\; str))
@@ -480,28 +551,28 @@
       str))
 
 (defun draw-cells-only (canvas)
-  "セル部分のみを描画（表示範囲のみ v0.7.7）"
+  "セル部分のみを描画（表示範囲のみ、タグ付き v0.8.0）"
   (sync-scroll-position)
   (let ((path (widget-path canvas))
         (commands nil))
     (format-wish "~a delete all" path)
     (multiple-value-bind (start-col start-row end-col end-row)
         (visible-cell-range)
-      ;; パス1: 表示範囲のセルの背景コマンドを収集
+      ;; パス1: 表示範囲のセルの背景コマンドを収集（タグ付き）
       (loop for y from start-row to end-row do
         (loop for x from start-col to end-col do
           (let ((cell (get-cell (cell-name x y))))
-            (push (make-cell-bg-command path x y
+            (push (make-cell-bg-command-tagged path x y
                                         (cell-value cell)
                                         (and (= x (cursor-x)) (= y (cursor-y)))
                                         (cell-in-selection-p x y)
                                         +header-w+ +header-h+)
                   commands))))
-      ;; パス2: 表示範囲のセルのテキストコマンドを収集
+      ;; パス2: 表示範囲のセルのテキストコマンドを収集（タグ付き）
       (loop for y from start-row to end-row do
         (loop for x from start-col to end-col do
           (let* ((cell (get-cell (cell-name x y)))
-                 (text-cmd (make-cell-text-command path x y (cell-value cell)
+                 (text-cmd (make-cell-text-command-tagged path x y (cell-value cell)
                                                    +header-w+ +header-h+)))
             (when text-cmd
               (push text-cmd commands))))))
@@ -1013,28 +1084,48 @@
   (max lo (min hi v)))
 
 (defun move-left (canvas text-widget)
-  (setf (cursor-x) (max 0 (1- (cursor-x))))
-  (update-text-input text-widget)
-  (redraw canvas)
-  (scroll-to-cursor canvas))
+  "左に移動（差分更新 v0.8.0）"
+  (let ((old-x (cursor-x))
+        (old-y (cursor-y)))
+    (setf (cursor-x) (max 0 (1- (cursor-x))))
+    (update-text-input text-widget)
+    ;; 差分更新: 旧位置と新位置のみ再描画
+    (redraw-single-cell canvas old-x old-y)
+    (redraw-single-cell canvas (cursor-x) (cursor-y))
+    (scroll-to-cursor canvas)))
 
 (defun move-right (canvas text-widget)
-  (setf (cursor-x) (min (1- (sheet-cols)) (1+ (cursor-x))))
-  (update-text-input text-widget)
-  (redraw canvas)
-  (scroll-to-cursor canvas))
+  "右に移動（差分更新 v0.8.0）"
+  (let ((old-x (cursor-x))
+        (old-y (cursor-y)))
+    (setf (cursor-x) (min (1- (sheet-cols)) (1+ (cursor-x))))
+    (update-text-input text-widget)
+    ;; 差分更新: 旧位置と新位置のみ再描画
+    (redraw-single-cell canvas old-x old-y)
+    (redraw-single-cell canvas (cursor-x) (cursor-y))
+    (scroll-to-cursor canvas)))
 
 (defun move-up (canvas text-widget)
-  (setf (cursor-y) (max 0 (1- (cursor-y))))
-  (update-text-input text-widget)
-  (redraw canvas)
-  (scroll-to-cursor canvas))
+  "上に移動（差分更新 v0.8.0）"
+  (let ((old-x (cursor-x))
+        (old-y (cursor-y)))
+    (setf (cursor-y) (max 0 (1- (cursor-y))))
+    (update-text-input text-widget)
+    ;; 差分更新: 旧位置と新位置のみ再描画
+    (redraw-single-cell canvas old-x old-y)
+    (redraw-single-cell canvas (cursor-x) (cursor-y))
+    (scroll-to-cursor canvas)))
 
 (defun move-down (canvas text-widget)
-  (setf (cursor-y) (min (1- (sheet-rows)) (1+ (cursor-y))))
-  (update-text-input text-widget)
-  (redraw canvas)
-  (scroll-to-cursor canvas))
+  "下に移動（差分更新 v0.8.0）"
+  (let ((old-x (cursor-x))
+        (old-y (cursor-y)))
+    (setf (cursor-y) (min (1- (sheet-rows)) (1+ (cursor-y))))
+    (update-text-input text-widget)
+    ;; 差分更新: 旧位置と新位置のみ再描画
+    (redraw-single-cell canvas old-x old-y)
+    (redraw-single-cell canvas (cursor-x) (cursor-y))
+    (scroll-to-cursor canvas)))
 
 ;;;; =========================
 ;;;; ダイアログ
