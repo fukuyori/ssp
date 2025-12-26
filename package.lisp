@@ -15,7 +15,7 @@
    ;; 起動
    #:start 
    ;; バージョン情報 (v0.7)
-   #:*ssp-version* #:version-info #:scroll-info
+   #:*ssp-version* #:version-info #:scroll-info #:visible-range-info
    ;; デバッグ
    #:show-dependencies #:show-cell-deps
    ;; キャッシュ・パフォーマンス (v0.7.1)
@@ -72,7 +72,7 @@
 ;;;; バージョン情報 (v0.7.2)
 ;;;; =========================
 
-(defparameter *ssp-version* "0.7.5")
+(defparameter *ssp-version* "0.7.7")
 
 (defun version-info ()
   "バージョン情報を返す"
@@ -399,6 +399,13 @@
 
 (defparameter *scroll-x* 0 "水平スクロール位置（ピクセル）")
 (defparameter *scroll-y* 0 "垂直スクロール位置（ピクセル）")
+
+;;;; =========================
+;;;; 実際のキャンバスサイズ (v0.7.7)
+;;;; =========================
+
+(defparameter *actual-canvas-width* nil "実際のキャンバス幅（ピクセル）、nilなら計算値を使用")
+(defparameter *actual-canvas-height* nil "実際のキャンバス高さ（ピクセル）、nilなら計算値を使用")
 
 ;;;; =========================
 ;;;; 後方互換性のためのグローバル変数

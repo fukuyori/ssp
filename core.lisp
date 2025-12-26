@@ -1,8 +1,9 @@
 ;;;; core.lisp
-;;;; SSP v0.7.2 - セル操作、依存関係、Undo/Redo、ファイルI/O
+;;;; SSP v0.7.7 - セル操作、依存関係、Undo/Redo、ファイルI/O
 ;;;; v0.7: UTF-8ファイルI/O、Excel互換CSV（BOM付き）
 ;;;; v0.7.1: 循環参照検出改善、評価キャッシュ、パフォーマンス最適化
 ;;;; v0.7.2: シートサイズ上限設定、インポート時のサイズ検証
+;;;; v0.7.7: 実際のキャンバスサイズ追跡
 
 (in-package :ssexp)
 
@@ -62,18 +63,20 @@
       (incf h (row-height y)))))
 
 (defun visible-width ()
-  "表示領域の幅（+visible-cols+列分）"
-  (let ((w +header-w+)
-        (cols (min +visible-cols+ (sheet-cols))))
-    (dotimes (x cols w)
-      (incf w (col-width x)))))
+  "表示領域の幅（実際のキャンバスサイズまたは+visible-cols+列分）"
+  (or *actual-canvas-width*
+      (let ((w +header-w+)
+            (cols (min +visible-cols+ (sheet-cols))))
+        (dotimes (x cols w)
+          (incf w (col-width x))))))
 
 (defun visible-height ()
-  "表示領域の高さ（+visible-rows+行分）"
-  (let ((h +header-h+)
-        (rows (min +visible-rows+ (sheet-rows))))
-    (dotimes (y rows h)
-      (incf h (row-height y)))))
+  "表示領域の高さ（実際のキャンバスサイズまたは+visible-rows+行分）"
+  (or *actual-canvas-height*
+      (let ((h +header-h+)
+            (rows (min +visible-rows+ (sheet-rows))))
+        (dotimes (y rows h)
+          (incf h (row-height y))))))
 
 (defun find-col-at (px)
   "X座標pxから列インデックスを取得（ヘッダー内なら-1）"

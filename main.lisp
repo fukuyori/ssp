@@ -404,17 +404,23 @@
         (format-wish "~a configure -scrollregion {0 0 ~d ~d}"
                      (widget-path canvas) cells-width cells-height))
       
-      ;; スクロール連動の設定 (v0.7.2 改善)
-      ;; Tcl側でスクロール処理を行い、再描画時にLisp側で位置を更新
+      ;; スクロール連動の設定 (v0.7.7 改善 - スクロール後に再描画)
+      ;; ssp_redraw コールバックを設定
+      (format-wish "proc ssp_redraw {} {}")  ; プレースホルダー
+      
+      ;; scroll_y: 垂直スクロール後に再描画
       (format-wish "proc scroll_y {args} {
           ~a yview {*}$args
           ~a yview {*}$args
+          after idle ssp_redraw
       }" (widget-path canvas) (widget-path row-header-canvas))
       (configure canvas-vscroll :command "scroll_y")
       
+      ;; scroll_x: 水平スクロール後に再描画
       (format-wish "proc scroll_x {args} {
           ~a xview {*}$args
           ~a xview {*}$args
+          after idle ssp_redraw
       }" (widget-path canvas) (widget-path col-header-canvas))
       (configure canvas-hscroll :command "scroll_x")
       
@@ -457,23 +463,108 @@
       ;; スクロール位置を初期化
       (setf *scroll-x* 0 *scroll-y* 0)
       
-      ;; マウスホイールスクロール (v0.7.2)
-      ;; Windows/Mac用 - MouseWheelイベント（%Dを安全に渡す）
-      (let ((canvas-path (widget-path canvas)))
-        (ltk::send-wish (format nil "bind ~a <MouseWheel> {ssp_wheel_y %D}" canvas-path))
-        (ltk::send-wish (format nil "bind ~a <Shift-MouseWheel> {ssp_wheel_x %D}" canvas-path)))
+      ;; スクロールバーリリース時に再描画 (v0.7.7)
+      (bind canvas-vscroll "<ButtonRelease-1>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (redraw canvas)))
+      (bind canvas-hscroll "<ButtonRelease-1>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (redraw canvas)))
       
-      ;; Linux用 (Button-4/5)
-      (format-wish "bind ~a <Button-4> {scroll_y scroll -3 units}" (widget-path canvas))
-      (format-wish "bind ~a <Button-5> {scroll_y scroll 3 units}" (widget-path canvas))
-      (format-wish "bind ~a <Shift-Button-4> {scroll_x scroll -3 units}" (widget-path canvas))
-      (format-wish "bind ~a <Shift-Button-5> {scroll_x scroll 3 units}" (widget-path canvas))
+      ;; スクロール位置監視タイマー (v0.7.7)
+      ;; Windows/Macのホイールスクロール対応
+      (let ((last-scroll-x 0)
+            (last-scroll-y 0)
+            (poll-active t))
+        (labels ((check-scroll-position ()
+                   (when poll-active
+                     ;; Tkのスクロール位置を取得
+                     (format-wish "senddatastrings [~a yview]" (widget-path canvas))
+                     (let ((yview (ltk::read-data)))
+                       (when (and yview (first yview))
+                         (let ((y-frac (ignore-errors (read-from-string (first yview)))))
+                           (when (and (numberp y-frac)
+                                     (/= y-frac last-scroll-y))
+                             (setf last-scroll-y y-frac)
+                             (redraw canvas)))))
+                     ;; 次のチェックをスケジュール
+                     (ltk:after 100 #'check-scroll-position))))
+          ;; ポーリング開始
+          (ltk:after 100 #'check-scroll-position)
+          ;; ウィンドウクローズ時にポーリング停止
+          (bind *tk* "<Destroy>"
+                (lambda (evt)
+                  (declare (ignore evt))
+                  (setf poll-active nil)))))
+      
+      ;; マウスホイールスクロール
+      ;; Linux用 (Button-4/5) - 即時再描画
+      (bind canvas "<Button-4>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "scroll_y scroll -3 units")
+              (redraw canvas)))
+      (bind canvas "<Button-5>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "scroll_y scroll 3 units")
+              (redraw canvas)))
+      (bind canvas "<Shift-Button-4>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "scroll_x scroll -3 units")
+              (redraw canvas)))
+      (bind canvas "<Shift-Button-5>"
+            (lambda (evt)
+              (declare (ignore evt))
+              (format-wish "scroll_x scroll 3 units")
+              (redraw canvas)))
+      
+      ;; Windows/Mac用 - Tclでdeltaを処理してscroll_y/scroll_xを呼ぶ
+      ;; ポーリングタイマーが位置変化を検出して再描画する
+      (let ((canvas-path (widget-path canvas)))
+        (format-wish "bind ~a <MouseWheel> {
+            if {%D > 0} {
+                scroll_y scroll -3 units
+            } else {
+                scroll_y scroll 3 units
+            }
+        }" canvas-path)
+        (format-wish "bind ~a <Shift-MouseWheel> {
+            if {%D > 0} {
+                scroll_x scroll -3 units
+            } else {
+                scroll_x scroll 3 units
+            }
+        }" canvas-path))
       
       ;; PanedWindowにペインを追加
       (format-wish ".paned add ~a -weight 0" (widget-path input-frame))
       (format-wish ".paned add ~a -weight 1" (widget-path canvas-frame))
       ;; PanedWindowをパック
       (format-wish "pack .paned -fill both -expand true -padx 2 -pady 2")
+
+      ;; ウィンドウリサイズ時に再描画 (v0.7.7)
+      (let ((resize-pending nil))
+        (bind canvas "<Configure>"
+              (lambda (evt)
+                (when evt
+                  ;; 実際のキャンバスサイズを取得
+                  (let ((new-w (ignore-errors (slot-value evt 'ltk::width)))
+                        (new-h (ignore-errors (slot-value evt 'ltk::height))))
+                    (when (and new-w new-h (numberp new-w) (numberp new-h)
+                               (> new-w 0) (> new-h 0))
+                      ;; 実際のキャンバスサイズを更新（ヘッダー分を加算）
+                      (setf *actual-canvas-width* (+ new-w +header-w+)
+                            *actual-canvas-height* (+ new-h +header-h+))
+                      ;; 遅延再描画（連続リサイズ対策）
+                      (unless resize-pending
+                        (setf resize-pending t)
+                        (ltk:after 100 (lambda ()
+                                        (setf resize-pending nil)
+                                        (redraw canvas))))))))))
 
       ;; 初期描画
       (update-text-input input-text)
@@ -532,16 +623,18 @@
         ;; Shift+Enter で改行
         (format-wish "bind ~a <Shift-Return> {~a insert insert \\n; break}" path path))
 
-      ;; キーボードスクロール (v0.7.2)
+      ;; キーボードスクロール (v0.7.7 改良 - 再描画付き)
       ;; Page Up/Down
       (bind canvas "<Prior>"
             (lambda (evt)
               (declare (ignore evt))
-              (format-wish "scroll_y scroll -1 pages")))
+              (format-wish "scroll_y scroll -1 pages")
+              (redraw canvas)))
       (bind canvas "<Next>"
             (lambda (evt)
               (declare (ignore evt))
-              (format-wish "scroll_y scroll 1 pages")))
+              (format-wish "scroll_y scroll 1 pages")
+              (redraw canvas)))
       ;; Ctrl+Home → 先頭へ（カーソルも移動）
       (bind canvas "<Control-Home>"
             (lambda (evt)
@@ -928,27 +1021,33 @@
               (redraw canvas)
               (update-text-input input-text)))
 
-      ;; 矢印キー（選択解除してから移動）
-      (bind canvas "<Left>"
-            (lambda (evt) 
-              (declare (ignore evt)) 
-              (clear-selection)
-              (move-left canvas input-text)))
-      (bind canvas "<Right>"
-            (lambda (evt) 
-              (declare (ignore evt)) 
-              (clear-selection)
-              (move-right canvas input-text)))
-      (bind canvas "<Up>"
-            (lambda (evt) 
-              (declare (ignore evt)) 
-              (clear-selection)
-              (move-up canvas input-text)))
-      (bind canvas "<Down>"
-            (lambda (evt) 
-              (declare (ignore evt)) 
-              (clear-selection)
-              (move-down canvas input-text)))
+      ;; 矢印キー（デバウンス付き v0.7.7）
+      ;; キーリピートによるイベント蓄積を防止
+      (let ((last-key-time 0)
+            (key-interval 30))  ; 最小間隔（ミリ秒）
+        (flet ((debounced-move (move-fn)
+                 (let ((now (get-internal-real-time)))
+                   (when (> (- now last-key-time) 
+                           (* key-interval (/ internal-time-units-per-second 1000)))
+                     (setf last-key-time now)
+                     (clear-selection)
+                     (funcall move-fn canvas input-text)))))
+          (bind canvas "<Left>"
+                (lambda (evt) 
+                  (declare (ignore evt)) 
+                  (debounced-move #'move-left)))
+          (bind canvas "<Right>"
+                (lambda (evt) 
+                  (declare (ignore evt)) 
+                  (debounced-move #'move-right)))
+          (bind canvas "<Up>"
+                (lambda (evt) 
+                  (declare (ignore evt)) 
+                  (debounced-move #'move-up)))
+          (bind canvas "<Down>"
+                (lambda (evt) 
+                  (declare (ignore evt)) 
+                  (debounced-move #'move-down)))))
 
       ;; Shift+矢印キー（範囲選択）
       (bind canvas "<Shift-Left>"

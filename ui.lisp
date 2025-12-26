@@ -1,9 +1,11 @@
 ;;;; ui.lisp
-;;;; SSP v0.7.5 - 描画、入力処理、シンタックスハイライト
+;;;; SSP v0.7.7 - 描画、入力処理、シンタックスハイライト
 ;;;; v0.7: 日本語・Unicode対応（フォント設定、文字幅計算）
 ;;;; v0.7.3: バッチ描画によるパフォーマンス改善
 ;;;; v0.7.4: 大規模シート対応（最大10000行）
 ;;;; v0.7.5: スクロール位置追跡の改善
+;;;; v0.7.6: 表示範囲計算の実装
+;;;; v0.7.7: 仮想スクロール描画（表示範囲のみ描画）
 
 (in-package :ssexp)
 
@@ -147,51 +149,131 @@
     (t "white")))
 
 ;;;; =========================
-;;;; 表示範囲計算 (v0.7.2)
+;;;; 表示範囲計算 (v0.7.6 改良)
 ;;;; =========================
+
+(defun find-start-col (scroll-x)
+  "スクロール位置から開始列を探す"
+  (let ((accum 0))
+    (dotimes (x (sheet-cols))
+      (let ((w (col-width x)))
+        (when (>= (+ accum w) scroll-x)
+          (return-from find-start-col x))
+        (incf accum w)))
+    (1- (sheet-cols))))
+
+(defun find-end-col (scroll-x visible-w)
+  "スクロール位置と表示幅から終了列を探す"
+  (let ((accum 0)
+        (target (+ scroll-x visible-w)))
+    (dotimes (x (sheet-cols))
+      (incf accum (col-width x))
+      (when (>= accum target)
+        (return-from find-end-col x)))
+    (1- (sheet-cols))))
+
+(defun find-start-row (scroll-y)
+  "スクロール位置から開始行を探す"
+  (let ((accum 0))
+    (dotimes (y (sheet-rows))
+      (let ((h (row-height y)))
+        (when (>= (+ accum h) scroll-y)
+          (return-from find-start-row y))
+        (incf accum h)))
+    (1- (sheet-rows))))
+
+(defun find-end-row (scroll-y visible-h)
+  "スクロール位置と表示高さから終了行を探す"
+  (let ((accum 0)
+        (target (+ scroll-y visible-h)))
+    (dotimes (y (sheet-rows))
+      (incf accum (row-height y))
+      (when (>= accum target)
+        (return-from find-end-row y)))
+    (1- (sheet-rows))))
 
 (defun visible-cell-range ()
   "表示されているセル範囲を返す (values start-col start-row end-col end-row)
-   注: Tkキャンバスが自動的にクリッピングするため、全範囲を返す"
-  ;; シンプルに全範囲を返す（Tkがクリッピング処理）
-  (values 0 0 (1- (sheet-cols)) (1- (sheet-rows))))
+   スクロール位置と表示サイズから正確に計算 (v0.7.6)"
+  (let* ((scroll-x (max 0 *scroll-x*))
+         (scroll-y (max 0 *scroll-y*))
+         (visible-w (- (visible-width) +header-w+))
+         (visible-h (- (visible-height) +header-h+))
+         ;; 開始位置を探す
+         (start-col (find-start-col scroll-x))
+         (start-row (find-start-row scroll-y))
+         ;; 終了位置を探す
+         (end-col (find-end-col scroll-x visible-w))
+         (end-row (find-end-row scroll-y visible-h)))
+    ;; マージンを追加（境界のちらつき防止）
+    (values (max 0 (1- start-col))
+            (max 0 (1- start-row))
+            (min (1+ end-col) (1- (sheet-cols)))
+            (min (1+ end-row) (1- (sheet-rows))))))
+
+(defun visible-range-info ()
+  "表示範囲の情報を返す（デバッグ用）"
+  (sync-scroll-position)
+  (multiple-value-bind (start-col start-row end-col end-row)
+      (visible-cell-range)
+    (let ((col-count (1+ (- end-col start-col)))
+          (row-count (1+ (- end-row start-row)))
+          (total-cells (* (sheet-cols) (sheet-rows))))
+      (format t "~%=== Visible Range (v0.7.6) ===~%")
+      (format t "Range: ~a~d to ~a~d~%"
+              (string (code-char (+ (char-code #\A) start-col))) (1+ start-row)
+              (string (code-char (+ (char-code #\A) end-col))) (1+ end-row))
+      (format t "Columns: ~d-~d (~d cols)~%" start-col end-col col-count)
+      (format t "Rows: ~d-~d (~d rows)~%" start-row end-row row-count)
+      (format t "Visible cells: ~d / ~d (~,1f%)~%"
+              (* col-count row-count) total-cells
+              (* 100.0 (/ (* col-count row-count) total-cells)))
+      (values start-col start-row end-col end-row))))
 
 (defun draw-col-headers (canvas)
-  "列名ヘッダー(A,B,C...)を描画（バッチ処理 v0.7.3）"
+  "列名ヘッダー(A,B,C...)を描画（表示範囲のみ v0.7.7）"
+  (sync-scroll-position)
   (let ((path (widget-path canvas))
         (header-font (format nil "{~a} ~a bold" *font-family* *font-size*))
         (commands nil))
     (format-wish "~a delete all" path)
-    (dotimes (x (sheet-cols))
-      (let* ((px (- (col-left x) +header-w+))
-             (w (col-width x))
-             (px2 (+ px w))
-             (col-name (string (code-char (+ (char-code #\A) x)))))
-        (push (format nil "~a create rectangle ~a 0 ~a ~a -fill {#e0e0e0} -outline gray"
-                      path px px2 +header-h+)
-              commands)
-        (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
-                      path (+ px (floor w 2)) (floor +header-h+ 2) col-name header-font)
-              commands)))
+    (multiple-value-bind (start-col start-row end-col end-row)
+        (visible-cell-range)
+      (declare (ignore start-row end-row))
+      (loop for x from start-col to end-col do
+        (let* ((px (- (col-left x) +header-w+))
+               (w (col-width x))
+               (px2 (+ px w))
+               (col-name (string (code-char (+ (char-code #\A) x)))))
+          (push (format nil "~a create rectangle ~a 0 ~a ~a -fill {#e0e0e0} -outline gray"
+                        path px px2 +header-h+)
+                commands)
+          (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                        path (+ px (floor w 2)) (floor +header-h+ 2) col-name header-font)
+                commands))))
     (send-batch-commands commands)))
 
 (defun draw-row-headers (canvas)
-  "行番号ヘッダー(1,2,3...)を描画（バッチ処理 v0.7.3）"
+  "行番号ヘッダー(1,2,3...)を描画（表示範囲のみ v0.7.7）"
+  (sync-scroll-position)
   (let ((path (widget-path canvas))
         (header-font (format nil "{~a} ~a bold" *font-family* *font-size*))
         (commands nil))
     (format-wish "~a delete all" path)
-    (dotimes (y (sheet-rows))
-      (let* ((py (- (row-top y) +header-h+))
-             (h (row-height y))
-             (py2 (+ py h))
-             (row-num (1+ y)))
-        (push (format nil "~a create rectangle 0 ~a ~a ~a -fill {#e0e0e0} -outline gray"
-                      path py +header-w+ py2)
-              commands)
-        (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
-                      path (floor +header-w+ 2) (+ py (floor h 2)) row-num header-font)
-              commands)))
+    (multiple-value-bind (start-col start-row end-col end-row)
+        (visible-cell-range)
+      (declare (ignore start-col end-col))
+      (loop for y from start-row to end-row do
+        (let* ((py (- (row-top y) +header-h+))
+               (h (row-height y))
+               (py2 (+ py h))
+               (row-num (1+ y)))
+          (push (format nil "~a create rectangle 0 ~a ~a ~a -fill {#e0e0e0} -outline gray"
+                        path py +header-w+ py2)
+                commands)
+          (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                        path (floor +header-w+ 2) (+ py (floor h 2)) row-num header-font)
+                commands))))
     (send-batch-commands commands)))
 
 (defun draw-headers (canvas)
@@ -398,28 +480,31 @@
       str))
 
 (defun draw-cells-only (canvas)
-  "セル部分のみを描画（バッチ処理 v0.7.3）"
+  "セル部分のみを描画（表示範囲のみ v0.7.7）"
+  (sync-scroll-position)
   (let ((path (widget-path canvas))
         (commands nil))
     (format-wish "~a delete all" path)
-    ;; パス1: 全セルの背景コマンドを収集
-    (dotimes (y (sheet-rows))
-      (dotimes (x (sheet-cols))
-        (let ((cell (get-cell (cell-name x y))))
-          (push (make-cell-bg-command path x y
-                                      (cell-value cell)
-                                      (and (= x (cursor-x)) (= y (cursor-y)))
-                                      (cell-in-selection-p x y)
-                                      +header-w+ +header-h+)
-                commands))))
-    ;; パス2: 全セルのテキストコマンドを収集
-    (dotimes (y (sheet-rows))
-      (dotimes (x (sheet-cols))
-        (let* ((cell (get-cell (cell-name x y)))
-               (text-cmd (make-cell-text-command path x y (cell-value cell)
-                                                 +header-w+ +header-h+)))
-          (when text-cmd
-            (push text-cmd commands)))))
+    (multiple-value-bind (start-col start-row end-col end-row)
+        (visible-cell-range)
+      ;; パス1: 表示範囲のセルの背景コマンドを収集
+      (loop for y from start-row to end-row do
+        (loop for x from start-col to end-col do
+          (let ((cell (get-cell (cell-name x y))))
+            (push (make-cell-bg-command path x y
+                                        (cell-value cell)
+                                        (and (= x (cursor-x)) (= y (cursor-y)))
+                                        (cell-in-selection-p x y)
+                                        +header-w+ +header-h+)
+                  commands))))
+      ;; パス2: 表示範囲のセルのテキストコマンドを収集
+      (loop for y from start-row to end-row do
+        (loop for x from start-col to end-col do
+          (let* ((cell (get-cell (cell-name x y)))
+                 (text-cmd (make-cell-text-command path x y (cell-value cell)
+                                                   +header-w+ +header-h+)))
+            (when text-cmd
+              (push text-cmd commands))))))
     ;; バッチ送信
     (send-batch-commands commands)))
 
