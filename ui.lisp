@@ -1,9 +1,51 @@
 ;;;; ui.lisp
-;;;; SSP v0.7.3 - 描画、入力処理、シンタックスハイライト
+;;;; SSP v0.7.5 - 描画、入力処理、シンタックスハイライト
 ;;;; v0.7: 日本語・Unicode対応（フォント設定、文字幅計算）
 ;;;; v0.7.3: バッチ描画によるパフォーマンス改善
+;;;; v0.7.4: 大規模シート対応（最大10000行）
+;;;; v0.7.5: スクロール位置追跡の改善
 
 (in-package :ssexp)
+
+;;;; =========================
+;;;; スクロール位置同期 (v0.7.5)
+;;;; =========================
+
+(defun sync-scroll-position ()
+  "Tkキャンバスのスクロール位置を *scroll-x* *scroll-y* に同期
+   スクロールバー/ホイール操作後の位置ずれを防止"
+  (when *main-canvas*
+    (let* ((cells-w (- (total-width) +header-w+))
+           (cells-h (- (total-height) +header-h+)))
+      ;; 水平位置を取得
+      (format-wish "senddatastrings [~a xview]" (widget-path *main-canvas*))
+      (let ((xview (ltk::read-data)))
+        (when (and xview (first xview))
+          (let ((x-fraction (ignore-errors (read-from-string (first xview)))))
+            (when (numberp x-fraction)
+              (setf *scroll-x* (round (* x-fraction cells-w)))))))
+      ;; 垂直位置を取得
+      (format-wish "senddatastrings [~a yview]" (widget-path *main-canvas*))
+      (let ((yview (ltk::read-data)))
+        (when (and yview (first yview))
+          (let ((y-fraction (ignore-errors (read-from-string (first yview)))))
+            (when (numberp y-fraction)
+              (setf *scroll-y* (round (* y-fraction cells-h))))))))))
+
+(defun scroll-info ()
+  "現在のスクロール位置情報を返す（デバッグ用）"
+  (sync-scroll-position)
+  (let* ((cells-w (- (total-width) +header-w+))
+         (cells-h (- (total-height) +header-h+))
+         (visible-w (- (visible-width) +header-w+))
+         (visible-h (- (visible-height) +header-h+)))
+    (format t "~%=== Scroll Info (v0.7.5) ===~%")
+    (format t "scroll-x: ~d / ~d px~%" *scroll-x* cells-w)
+    (format t "scroll-y: ~d / ~d px~%" *scroll-y* cells-h)
+    (format t "visible: ~d x ~d px~%" visible-w visible-h)
+    (format t "cursor: (~d, ~d) = ~a~%" 
+            (cursor-x) (cursor-y) (cell-name (cursor-x) (cursor-y)))
+    (values *scroll-x* *scroll-y*)))
 
 ;;;; =========================
 ;;;; 描画（Canvas操作）
@@ -204,30 +246,63 @@
                      (widget-path canvas) (total-width) (total-height)))))
 
 (defun scroll-to-cursor (canvas)
-  "カーソル位置が表示されるようにスクロール（4キャンバス対応 v0.7.2）"
-  (let* ((cursor-left (- (col-left (cursor-x)) +header-w+))
+  "カーソルが表示枠外にある場合のみスクロール（v0.7.5改良）
+   表示枠内なら何もしない"
+  ;; まずTkの実際のスクロール位置と同期
+  (sync-scroll-position)
+  (let* ((main-canvas (or *main-canvas* canvas))
+         ;; セル領域のサイズ
+         (cells-w (- (total-width) +header-w+))
+         (cells-h (- (total-height) +header-h+))
+         ;; 表示領域のサイズ
+         (visible-w (- (visible-width) +header-w+))
+         (visible-h (- (visible-height) +header-h+))
+         ;; カーソルセルの位置（セル領域内座標）
+         (cursor-left (- (col-left (cursor-x)) +header-w+))
          (cursor-right (+ cursor-left (col-width (cursor-x))))
          (cursor-top (- (row-top (cursor-y)) +header-h+))
          (cursor-bottom (+ cursor-top (row-height (cursor-y))))
-         (cells-w (- (total-width) +header-w+))
-         (cells-h (- (total-height) +header-h+))
-         (visible-w (- (visible-width) +header-w+))
-         (visible-h (- (visible-height) +header-h+))
-         (main-canvas (or *main-canvas* canvas)))
-    ;; 水平スクロール
+         ;; 現在のスクロール位置（ピクセル）
+         (scroll-left *scroll-x*)
+         (scroll-top *scroll-y*)
+         (scroll-right (+ scroll-left visible-w))
+         (scroll-bottom (+ scroll-top visible-h)))
+    ;; 水平方向チェック
     (when (> cells-w visible-w)
-      (let ((xpos (max 0.0 (min (/ (float cursor-left) cells-w)
-                                (- 1.0 (/ (float visible-w) cells-w))))))
-        (format-wish "~a xview moveto ~f" (widget-path main-canvas) xpos)
-        (when *col-header-canvas*
-          (format-wish "~a xview moveto ~f" (widget-path *col-header-canvas*) xpos))))
-    ;; 垂直スクロール
+      (cond
+        ;; カーソルが左にはみ出し
+        ((< cursor-left scroll-left)
+         (let ((xpos (/ (float cursor-left) cells-w)))
+           (format-wish "~a xview moveto ~f" (widget-path main-canvas) xpos)
+           (when *col-header-canvas*
+             (format-wish "~a xview moveto ~f" (widget-path *col-header-canvas*) xpos))
+           (setf *scroll-x* cursor-left)))
+        ;; カーソルが右にはみ出し
+        ((> cursor-right scroll-right)
+         (let* ((new-left (- cursor-right visible-w))
+                (xpos (/ (float new-left) cells-w)))
+           (format-wish "~a xview moveto ~f" (widget-path main-canvas) xpos)
+           (when *col-header-canvas*
+             (format-wish "~a xview moveto ~f" (widget-path *col-header-canvas*) xpos))
+           (setf *scroll-x* new-left)))))
+    ;; 垂直方向チェック
     (when (> cells-h visible-h)
-      (let ((ypos (max 0.0 (min (/ (float cursor-top) cells-h)
-                                (- 1.0 (/ (float visible-h) cells-h))))))
-        (format-wish "~a yview moveto ~f" (widget-path main-canvas) ypos)
-        (when *row-header-canvas*
-          (format-wish "~a yview moveto ~f" (widget-path *row-header-canvas*) ypos))))))
+      (cond
+        ;; カーソルが上にはみ出し
+        ((< cursor-top scroll-top)
+         (let ((ypos (/ (float cursor-top) cells-h)))
+           (format-wish "~a yview moveto ~f" (widget-path main-canvas) ypos)
+           (when *row-header-canvas*
+             (format-wish "~a yview moveto ~f" (widget-path *row-header-canvas*) ypos))
+           (setf *scroll-y* cursor-top)))
+        ;; カーソルが下にはみ出し
+        ((> cursor-bottom scroll-bottom)
+         (let* ((new-top (- cursor-bottom visible-h))
+                (ypos (/ (float new-top) cells-h)))
+           (format-wish "~a yview moveto ~f" (widget-path main-canvas) ypos)
+           (when *row-header-canvas*
+             (format-wish "~a yview moveto ~f" (widget-path *row-header-canvas*) ypos))
+           (setf *scroll-y* new-top)))))))
 
 ;;; ============================
 ;;; 複数キャンバス対応描画関数 (v0.7.2)
@@ -835,7 +910,8 @@
         (selection-end-x) (cursor-x)
         (selection-end-y) (cursor-y))
   (update-text-input text-widget)
-  (redraw canvas))
+  (redraw canvas)
+  (scroll-to-cursor canvas))
 
 ;;; 後方互換性のため旧関数も残す
 (defun entry-text (e) (get-text-content e))
@@ -854,22 +930,26 @@
 (defun move-left (canvas text-widget)
   (setf (cursor-x) (max 0 (1- (cursor-x))))
   (update-text-input text-widget)
-  (redraw canvas))
+  (redraw canvas)
+  (scroll-to-cursor canvas))
 
 (defun move-right (canvas text-widget)
   (setf (cursor-x) (min (1- (sheet-cols)) (1+ (cursor-x))))
   (update-text-input text-widget)
-  (redraw canvas))
+  (redraw canvas)
+  (scroll-to-cursor canvas))
 
 (defun move-up (canvas text-widget)
   (setf (cursor-y) (max 0 (1- (cursor-y))))
   (update-text-input text-widget)
-  (redraw canvas))
+  (redraw canvas)
+  (scroll-to-cursor canvas))
 
 (defun move-down (canvas text-widget)
   (setf (cursor-y) (min (1- (sheet-rows)) (1+ (cursor-y))))
   (update-text-input text-widget)
-  (redraw canvas))
+  (redraw canvas)
+  (scroll-to-cursor canvas))
 
 ;;;; =========================
 ;;;; ダイアログ

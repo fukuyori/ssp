@@ -3,7 +3,7 @@
 **SSPはノートブックではありません。**  
 **セルがスクリプトではなく「式」である、Lispネイティブな評価空間です。**
 
-![Version](https://img.shields.io/badge/version-0.7.3-blue.svg)
+![Version](https://img.shields.io/badge/version-0.7.5-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Lisp](https://img.shields.io/badge/Common%20Lisp-SBCL-red.svg)
 ![GUI](https://img.shields.io/badge/GUI-LTK%2FTk-orange.svg)

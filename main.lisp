@@ -542,23 +542,35 @@
             (lambda (evt)
               (declare (ignore evt))
               (format-wish "scroll_y scroll 1 pages")))
-      ;; Ctrl+Home → 先頭へ
+      ;; Ctrl+Home → 先頭へ（カーソルも移動）
       (bind canvas "<Control-Home>"
             (lambda (evt)
               (declare (ignore evt))
+              (setf (cursor-x) 0 (cursor-y) 0)
+              (setf (selection-start-x) 0 (selection-start-y) 0
+                    (selection-end-x) 0 (selection-end-y) 0)
               (format-wish "~a yview moveto 0" (widget-path canvas))
               (format-wish "~a yview moveto 0" (widget-path row-header-canvas))
               (format-wish "~a xview moveto 0" (widget-path canvas))
               (format-wish "~a xview moveto 0" (widget-path col-header-canvas))
-              (setf *scroll-x* 0 *scroll-y* 0)))
-      ;; Ctrl+End → 末尾へ
+              (setf *scroll-x* 0 *scroll-y* 0)
+              (update-text-input input-text)
+              (redraw canvas)))
+      ;; Ctrl+End → 末尾へ（カーソルも移動）
       (bind canvas "<Control-End>"
             (lambda (evt)
               (declare (ignore evt))
-              (format-wish "~a yview moveto 1" (widget-path canvas))
-              (format-wish "~a yview moveto 1" (widget-path row-header-canvas))
-              (format-wish "~a xview moveto 1" (widget-path canvas))
-              (format-wish "~a xview moveto 1" (widget-path col-header-canvas))))
+              (let ((last-x (1- (sheet-cols)))
+                    (last-y (1- (sheet-rows))))
+                (setf (cursor-x) last-x (cursor-y) last-y)
+                (setf (selection-start-x) last-x (selection-start-y) last-y
+                      (selection-end-x) last-x (selection-end-y) last-y)
+                (format-wish "~a yview moveto 1" (widget-path canvas))
+                (format-wish "~a yview moveto 1" (widget-path row-header-canvas))
+                (format-wish "~a xview moveto 1" (widget-path canvas))
+                (format-wish "~a xview moveto 1" (widget-path col-header-canvas))
+                (update-text-input input-text)
+                (redraw canvas))))
 
       ;; セルクリック → 選択開始（クリック時のみスクロール位置を取得 v0.7.2改善）
       (bind canvas "<ButtonPress-1>"

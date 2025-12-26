@@ -15,7 +15,7 @@
    ;; 起動
    #:start 
    ;; バージョン情報 (v0.7)
-   #:*ssp-version* #:version-info
+   #:*ssp-version* #:version-info #:scroll-info
    ;; デバッグ
    #:show-dependencies #:show-cell-deps
    ;; キャッシュ・パフォーマンス (v0.7.1)
@@ -72,7 +72,7 @@
 ;;;; バージョン情報 (v0.7.2)
 ;;;; =========================
 
-(defparameter *ssp-version* "0.7.3")
+(defparameter *ssp-version* "0.7.5")
 
 (defun version-info ()
   "バージョン情報を返す"
@@ -86,8 +86,8 @@
 ;;;; シートサイズ制限 (v0.7.2 新規)
 ;;;; =========================
 
-(defconstant +max-rows+ 1000
-  "最大行数（パフォーマンス制限）")
+(defconstant +max-rows+ 10000
+  "最大行数（v0.7.4で拡張）")
 
 (defconstant +max-cols+ 26
   "最大列数（A-Z、セル名形式制限）")
