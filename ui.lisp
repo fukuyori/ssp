@@ -1,6 +1,7 @@
 ;;;; ui.lisp
-;;;; SSP v0.7.2 - 描画、入力処理、シンタックスハイライト
+;;;; SSP v0.7.3 - 描画、入力処理、シンタックスハイライト
 ;;;; v0.7: 日本語・Unicode対応（フォント設定、文字幅計算）
+;;;; v0.7.3: バッチ描画によるパフォーマンス改善
 
 (in-package :ssexp)
 
@@ -74,7 +75,37 @@
                  path +header-w+ +header-h+)))
 
 ;;;; =========================
-;;;; 表示範囲計算 (v0.7.2 パフォーマンス改善)
+;;;; バッチ描画ユーティリティ (v0.7.3 パフォーマンス改善)
+;;;; =========================
+
+(defparameter *batch-size* 500
+  "1回のformat-wishで送信するコマンド数の上限")
+
+(defun send-batch-commands (commands)
+  "コマンドリストをバッチで送信（v0.7.3）"
+  (when commands
+    (let ((cmd-list (nreverse commands)))
+      ;; *batch-size*ごとに分割送信
+      (loop while cmd-list do
+        (let ((batch (loop repeat *batch-size*
+                          while cmd-list
+                          collect (pop cmd-list))))
+          (when batch
+            (format-wish "~{~a~^; ~}" batch)))))))
+
+(defun cell-bg-color (val selected in-selection)
+  "セルの背景色を決定"
+  (cond
+    (selected "#cce5ff")
+    (in-selection "#d0e8ff")
+    ((null val) "white")
+    ((listp val) "#f0fff0")
+    ((and val (symbolp val)) "#fff0f0")
+    ((stringp val) "#fffff0")
+    (t "white")))
+
+;;;; =========================
+;;;; 表示範囲計算 (v0.7.2)
 ;;;; =========================
 
 (defun visible-cell-range ()
@@ -84,62 +115,77 @@
   (values 0 0 (1- (sheet-cols)) (1- (sheet-rows))))
 
 (defun draw-col-headers (canvas)
-  "列名ヘッダー(A,B,C...)を描画"
+  "列名ヘッダー(A,B,C...)を描画（バッチ処理 v0.7.3）"
   (let ((path (widget-path canvas))
-        (header-font (format nil "{~a} ~a bold" *font-family* *font-size*)))
+        (header-font (format nil "{~a} ~a bold" *font-family* *font-size*))
+        (commands nil))
     (format-wish "~a delete all" path)
     (dotimes (x (sheet-cols))
       (let* ((px (- (col-left x) +header-w+))
              (w (col-width x))
              (px2 (+ px w))
              (col-name (string (code-char (+ (char-code #\A) x)))))
-        (format-wish "~a create rectangle ~a 0 ~a ~a -fill {#e0e0e0} -outline gray"
-                     path px px2 +header-h+)
-        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
-                     path (+ px (floor w 2)) (floor +header-h+ 2) col-name header-font)))))
+        (push (format nil "~a create rectangle ~a 0 ~a ~a -fill {#e0e0e0} -outline gray"
+                      path px px2 +header-h+)
+              commands)
+        (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                      path (+ px (floor w 2)) (floor +header-h+ 2) col-name header-font)
+              commands)))
+    (send-batch-commands commands)))
 
 (defun draw-row-headers (canvas)
-  "行番号ヘッダー(1,2,3...)を描画"
+  "行番号ヘッダー(1,2,3...)を描画（バッチ処理 v0.7.3）"
   (let ((path (widget-path canvas))
-        (header-font (format nil "{~a} ~a bold" *font-family* *font-size*)))
+        (header-font (format nil "{~a} ~a bold" *font-family* *font-size*))
+        (commands nil))
     (format-wish "~a delete all" path)
     (dotimes (y (sheet-rows))
       (let* ((py (- (row-top y) +header-h+))
              (h (row-height y))
              (py2 (+ py h))
              (row-num (1+ y)))
-        (format-wish "~a create rectangle 0 ~a ~a ~a -fill {#e0e0e0} -outline gray"
-                     path py +header-w+ py2)
-        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
-                     path (floor +header-w+ 2) (+ py (floor h 2)) row-num header-font)))))
+        (push (format nil "~a create rectangle 0 ~a ~a ~a -fill {#e0e0e0} -outline gray"
+                      path py +header-w+ py2)
+              commands)
+        (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                      path (floor +header-w+ 2) (+ py (floor h 2)) row-num header-font)
+              commands)))
+    (send-batch-commands commands)))
 
 (defun draw-headers (canvas)
-  "列名(A,B,C...)と行番号(1,2,3...)のヘッダーを描画（後方互換用）"
+  "列名(A,B,C...)と行番号(1,2,3...)のヘッダーを描画（後方互換用・バッチ処理 v0.7.3）"
   (let ((path (widget-path canvas))
-        (header-font (format nil "{~a} ~a bold" *font-family* *font-size*)))
+        (header-font (format nil "{~a} ~a bold" *font-family* *font-size*))
+        (commands nil))
     ;; 左上隅の空白セル
-    (format-wish "~a create rectangle 0 0 ~a ~a -fill {#e0e0e0} -outline gray"
-                 path +header-w+ +header-h+)
+    (push (format nil "~a create rectangle 0 0 ~a ~a -fill {#e0e0e0} -outline gray"
+                  path +header-w+ +header-h+)
+          commands)
     ;; 列名ヘッダー
     (dotimes (x (sheet-cols))
       (let* ((px (col-left x))
              (w (col-width x))
              (px2 (+ px w))
              (col-name (string (code-char (+ (char-code #\A) x)))))
-        (format-wish "~a create rectangle ~a 0 ~a ~a -fill {#e0e0e0} -outline gray"
-                     path px px2 +header-h+)
-        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
-                     path (+ px (floor w 2)) (floor +header-h+ 2) col-name header-font)))
+        (push (format nil "~a create rectangle ~a 0 ~a ~a -fill {#e0e0e0} -outline gray"
+                      path px px2 +header-h+)
+              commands)
+        (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                      path (+ px (floor w 2)) (floor +header-h+ 2) col-name header-font)
+              commands)))
     ;; 行番号ヘッダー
     (dotimes (y (sheet-rows))
       (let* ((py (row-top y))
              (h (row-height y))
              (py2 (+ py h))
              (row-num (1+ y)))
-        (format-wish "~a create rectangle 0 ~a ~a ~a -fill {#e0e0e0} -outline gray"
-                     path py +header-w+ py2)
-        (format-wish "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
-                     path (floor +header-w+ 2) (+ py (floor h 2)) row-num header-font)))))
+        (push (format nil "~a create rectangle 0 ~a ~a ~a -fill {#e0e0e0} -outline gray"
+                      path py +header-w+ py2)
+              commands)
+        (push (format nil "~a create text ~a ~a -anchor center -text {~a} -font {~a}"
+                      path (floor +header-w+ 2) (+ py (floor h 2)) row-num header-font)
+              commands)))
+    (send-batch-commands commands)))
 
 (defun update-scroll-region (canvas)
   "スクロール領域を更新（4キャンバス対応 v0.7.2）"
@@ -185,30 +231,24 @@
 
 ;;; ============================
 ;;; 複数キャンバス対応描画関数 (v0.7.2)
+;;; バッチ処理対応 (v0.7.3)
 ;;; ============================
 
 (defun draw-cell-background-offset (canvas x y val selected in-selection offset-x offset-y)
-  "セルの背景のみを描画（オフセット指定版）"
+  "セルの背景のみを描画（オフセット指定版）- 非バッチ用"
   (let* ((px (- (col-left x) offset-x))
          (py (- (row-top y) offset-y))
          (w (col-width x))
          (h (row-height y))
          (px2 (+ px w))
          (py2 (+ py h))
-         (bg (cond
-               (selected "#cce5ff")
-               (in-selection "#d0e8ff")
-               ((null val) "white")
-               ((listp val) "#f0fff0")
-               ((and val (symbolp val)) "#fff0f0")
-               ((stringp val) "#fffff0")
-               (t "white")))
+         (bg (cell-bg-color val selected in-selection))
          (path (widget-path canvas)))
     (format-wish "~a create rectangle ~a ~a ~a ~a -fill {~a} -outline gray"
                  path px py px2 py2 bg)))
 
 (defun draw-cell-text-offset (canvas x y val offset-x offset-y)
-  "セルのテキストのみを描画（オフセット指定版）"
+  "セルのテキストのみを描画（オフセット指定版）- 非バッチ用"
   (when val
     (let* ((px (- (col-left x) offset-x))
            (py (- (row-top y) offset-y))
@@ -231,23 +271,82 @@
           (format-wish "~a create text ~a ~a -anchor w -text {~a} -font {~a}"
                        path (+ px 6) (+ py (floor h 2)) display-text font-spec)))))
 
+(defun make-cell-bg-command (path x y val selected in-selection offset-x offset-y)
+  "セル背景描画コマンドを生成（バッチ用 v0.7.3）"
+  (let* ((px (- (col-left x) offset-x))
+         (py (- (row-top y) offset-y))
+         (w (col-width x))
+         (h (row-height y))
+         (px2 (+ px w))
+         (py2 (+ py h))
+         (bg (cell-bg-color val selected in-selection)))
+    (format nil "~a create rectangle ~a ~a ~a ~a -fill {~a} -outline gray"
+            path px py px2 py2 bg)))
+
+(defun make-cell-text-command (path x y val offset-x offset-y)
+  "セルテキスト描画コマンドを生成（バッチ用 v0.7.3）"
+  (when val
+    (let* ((px (- (col-left x) offset-x))
+           (py (- (row-top y) offset-y))
+           (w (col-width x))
+           (h (row-height y))
+           (raw-text (format-value val))
+           (available-width (- w 12))
+           (char-pixel-width 7)
+           (available-chars (floor available-width char-pixel-width))
+           (display-text (if (> (string-display-width raw-text) available-chars)
+                            (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
+                            raw-text))
+           (is-number (numberp val))
+           (font-spec (format nil "{~a} ~a" *font-family* *font-size*))
+           ;; テキスト内の特殊文字をエスケープ
+           (safe-text (escape-tcl-string display-text)))
+      (if is-number
+          (format nil "~a create text ~a ~a -anchor e -text {~a} -font {~a}"
+                  path (+ px w -6) (+ py (floor h 2)) safe-text font-spec)
+          (format nil "~a create text ~a ~a -anchor w -text {~a} -font {~a}"
+                  path (+ px 6) (+ py (floor h 2)) safe-text font-spec)))))
+
+(defun escape-tcl-string (str)
+  "Tcl文字列内の特殊文字をエスケープ（v0.7.3）"
+  (if (or (find #\{ str) (find #\} str) (find #\\ str) (find #\; str))
+      ;; 特殊文字がある場合はダブルクォートで囲む
+      (with-output-to-string (out)
+        (loop for c across str do
+          (case c
+            (#\\ (write-string "\\\\" out))
+            (#\" (write-string "\\\"" out))
+            (#\[ (write-string "\\[" out))
+            (#\] (write-string "\\]" out))
+            (#\$ (write-string "\\$" out))
+            (t (write-char c out)))))
+      str))
+
 (defun draw-cells-only (canvas)
-  "セル部分のみを描画（ヘッダーなし、オフセット適用）"
-  (format-wish "~a delete all" (widget-path canvas))
-  ;; パス1: 全セルの背景を描画
-  (dotimes (y (sheet-rows))
-    (dotimes (x (sheet-cols))
-      (let ((cell (get-cell (cell-name x y))))
-        (draw-cell-background-offset canvas x y
-                                     (cell-value cell)
-                                     (and (= x (cursor-x)) (= y (cursor-y)))
-                                     (cell-in-selection-p x y)
-                                     +header-w+ +header-h+))))
-  ;; パス2: 全セルのテキストを描画
-  (dotimes (y (sheet-rows))
-    (dotimes (x (sheet-cols))
-      (let ((cell (get-cell (cell-name x y))))
-        (draw-cell-text-offset canvas x y (cell-value cell) +header-w+ +header-h+)))))
+  "セル部分のみを描画（バッチ処理 v0.7.3）"
+  (let ((path (widget-path canvas))
+        (commands nil))
+    (format-wish "~a delete all" path)
+    ;; パス1: 全セルの背景コマンドを収集
+    (dotimes (y (sheet-rows))
+      (dotimes (x (sheet-cols))
+        (let ((cell (get-cell (cell-name x y))))
+          (push (make-cell-bg-command path x y
+                                      (cell-value cell)
+                                      (and (= x (cursor-x)) (= y (cursor-y)))
+                                      (cell-in-selection-p x y)
+                                      +header-w+ +header-h+)
+                commands))))
+    ;; パス2: 全セルのテキストコマンドを収集
+    (dotimes (y (sheet-rows))
+      (dotimes (x (sheet-cols))
+        (let* ((cell (get-cell (cell-name x y)))
+               (text-cmd (make-cell-text-command path x y (cell-value cell)
+                                                 +header-w+ +header-h+)))
+          (when text-cmd
+            (push text-cmd commands)))))
+    ;; バッチ送信
+    (send-batch-commands commands)))
 
 (defun redraw-all (corner-canvas col-header-canvas row-header-canvas main-canvas)
   "4つのキャンバスすべてを再描画（ヘッダー固定対応）"
@@ -257,7 +356,7 @@
   (draw-cells-only main-canvas))
 
 (defun redraw (canvas)
-  "画面全体を再描画（4キャンバス対応 v0.7.2）"
+  "画面全体を再描画（4キャンバス対応 v0.7.2、バッチ処理 v0.7.3）"
   ;; グローバルキャンバス参照がある場合は4キャンバス描画
   (if (and *corner-canvas* *col-header-canvas* *row-header-canvas* *main-canvas*)
       (progn
@@ -265,23 +364,52 @@
         (draw-col-headers *col-header-canvas*)
         (draw-row-headers *row-header-canvas*)
         (draw-cells-only *main-canvas*))
-      ;; 後方互換：単一キャンバスモード
-      (progn
-        (format-wish "~a delete all" (widget-path canvas))
+      ;; 後方互換：単一キャンバスモード（バッチ処理 v0.7.3）
+      (let ((path (widget-path canvas))
+            (commands nil))
+        (format-wish "~a delete all" path)
         (draw-headers canvas)
-        ;; パス1: 全セルの背景を描画
+        ;; パス1: 全セルの背景コマンドを収集
         (dotimes (y (sheet-rows))
           (dotimes (x (sheet-cols))
-            (let ((cell (get-cell (cell-name x y))))
-              (draw-cell-background canvas x y
-                                    (cell-value cell)
-                                    (and (= x (cursor-x)) (= y (cursor-y)))
-                                    (cell-in-selection-p x y)))))
-        ;; パス2: 全セルのテキストを描画（背景の上に重ねる）
-        (dotimes (y (sheet-rows))
-          (dotimes (x (sheet-cols))
-            (let ((cell (get-cell (cell-name x y))))
-              (draw-cell-text canvas x y (cell-value cell))))))))
+            (let* ((cell (get-cell (cell-name x y)))
+                   (val (cell-value cell))
+                   (selected (and (= x (cursor-x)) (= y (cursor-y))))
+                   (in-sel (cell-in-selection-p x y))
+                   (px (col-left x))
+                   (py (row-top y))
+                   (w (col-width x))
+                   (h (row-height y))
+                   (bg (cell-bg-color val selected in-sel)))
+              (push (format nil "~a create rectangle ~a ~a ~a ~a -fill {~a} -outline gray"
+                            path px py (+ px w) (+ py h) bg)
+                    commands))))
+        ;; パス2: 全セルのテキストコマンドを収集
+        (let ((font-spec (format nil "{~a} ~a" *font-family* *font-size*)))
+          (dotimes (y (sheet-rows))
+            (dotimes (x (sheet-cols))
+              (let ((val (cell-value (get-cell (cell-name x y)))))
+                (when val
+                  (let* ((px (col-left x))
+                         (py (row-top y))
+                         (w (col-width x))
+                         (h (row-height y))
+                         (raw-text (format-value val))
+                         (available-width (- w 12))
+                         (available-chars (floor available-width 7))
+                         (display-text (if (> (string-display-width raw-text) available-chars)
+                                          (truncate-to-display-width raw-text (max 1 (- available-chars 1)))
+                                          raw-text))
+                         (safe-text (escape-tcl-string display-text)))
+                    (if (numberp val)
+                        (push (format nil "~a create text ~a ~a -anchor e -text {~a} -font {~a}"
+                                      path (+ px w -6) (+ py (floor h 2)) safe-text font-spec)
+                              commands)
+                        (push (format nil "~a create text ~a ~a -anchor w -text {~a} -font {~a}"
+                                      path (+ px 6) (+ py (floor h 2)) safe-text font-spec)
+                              commands))))))))
+        ;; バッチ送信
+        (send-batch-commands commands))))
 
 ;;;; =========================
 ;;;; 入力欄（Text）の操作
